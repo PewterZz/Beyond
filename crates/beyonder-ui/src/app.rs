@@ -414,7 +414,14 @@ impl App {
                     MouseScrollDelta::LineDelta(_, y) => -y * 20.0,
                     MouseScrollDelta::PixelDelta(pos) => -pos.y as f32,
                 };
-                self.renderer.scroll(scroll);
+                // If cursor is over the input bar, scroll the input text; otherwise scroll blocks.
+                let win_h = self.renderer.surface_size().1;
+                let bar_top = win_h - self.renderer.bar_height_phys();
+                if self.cursor_pos.1 >= bar_top {
+                    self.renderer.scroll_input(scroll);
+                } else {
+                    self.renderer.scroll(scroll);
+                }
                 false
             }
             WindowEvent::CloseRequested => true,
@@ -722,6 +729,7 @@ impl App {
                                 self.write_to_pty(&payload);
                             } else {
                                 self.input.insert_text(&text);
+                                self.renderer.snap_input_scroll_to_cursor();
                             }
                         }
                     }
@@ -750,7 +758,7 @@ impl App {
             if let Key::Character(s) = &event.logical_key {
                 match s.as_str() {
                     "c" => { self.copy_selection(); return; }
-                    "a" => { self.input.select_all(); return; }
+                    "a" => { self.input.select_all(); self.renderer.snap_input_scroll_to_cursor(); return; }
                     "x" => {
                         // Cut: copy all input text to clipboard then clear.
                         if !self.input.text.is_empty() {
@@ -760,6 +768,7 @@ impl App {
                             self.input.select_all();
                             self.input.delete_backward();
                         }
+                        self.renderer.snap_input_scroll_to_cursor();
                         return;
                     }
                     _ => {}
@@ -767,8 +776,8 @@ impl App {
             }
             // Cmd/Ctrl+Left = home, Cmd/Ctrl+Right = end.
             match &event.logical_key {
-                Key::Named(NamedKey::ArrowLeft)  => { self.input.move_home(); return; }
-                Key::Named(NamedKey::ArrowRight) => { self.input.move_end();  return; }
+                Key::Named(NamedKey::ArrowLeft)  => { self.input.move_home(); self.renderer.snap_input_scroll_to_cursor(); return; }
+                Key::Named(NamedKey::ArrowRight) => { self.input.move_end();  self.renderer.snap_input_scroll_to_cursor(); return; }
                 _ => {}
             }
         }
@@ -776,8 +785,8 @@ impl App {
         // Alt/Option+Left/Right — word navigation.
         if self.modifiers.alt_key() {
             match &event.logical_key {
-                Key::Named(NamedKey::ArrowLeft)  => { self.input.word_left();  return; }
-                Key::Named(NamedKey::ArrowRight) => { self.input.word_right(); return; }
+                Key::Named(NamedKey::ArrowLeft)  => { self.input.word_left();  self.renderer.snap_input_scroll_to_cursor(); return; }
+                Key::Named(NamedKey::ArrowRight) => { self.input.word_right(); self.renderer.snap_input_scroll_to_cursor(); return; }
                 _ => {}
             }
         }
@@ -786,11 +795,11 @@ impl App {
         if self.modifiers.control_key() {
             if let Key::Character(s) = &event.logical_key {
                 match s.as_str() {
-                    "a" => { self.input.move_home();             return; }
-                    "e" => { self.input.move_end();              return; }
-                    "k" => { self.input.kill_to_end();           return; }
-                    "u" => { self.input.kill_to_start();         return; }
-                    "w" => { self.input.delete_word_backward();  return; }
+                    "a" => { self.input.move_home();             self.renderer.snap_input_scroll_to_cursor(); return; }
+                    "e" => { self.input.move_end();              self.renderer.snap_input_scroll_to_cursor(); return; }
+                    "k" => { self.input.kill_to_end();           self.renderer.snap_input_scroll_to_cursor(); return; }
+                    "u" => { self.input.kill_to_start();         self.renderer.snap_input_scroll_to_cursor(); return; }
+                    "w" => { self.input.delete_word_backward();  self.renderer.snap_input_scroll_to_cursor(); return; }
                     _ => {}
                 }
             }
@@ -798,7 +807,10 @@ impl App {
 
         match &event.logical_key {
             Key::Named(NamedKey::Enter) => {
-                if !self.input.is_empty() {
+                if self.modifiers.shift_key() {
+                    // Shift+Enter: insert a newline into the input (multi-line).
+                    self.input.insert('\n');
+                } else if !self.input.is_empty() {
                     let text = self.input.submit();
                     self.input.push_history(text.clone());
                     self.route_input(text).await;
@@ -843,6 +855,8 @@ impl App {
             }
             _ => {}
         }
+        // After any cursor-moving or editing key, snap the input viewport so the cursor stays visible.
+        self.renderer.snap_input_scroll_to_cursor();
     }
 
     fn copy_selection(&self) {
@@ -1193,7 +1207,9 @@ impl App {
         };
         self.blocks.push(block.clone());
         self.renderer.blocks.push(block);
-        self.renderer.viewport.scroll_to_bottom();
+        if self.renderer.viewport.pinned_to_bottom {
+            self.renderer.viewport.scroll_to_bottom();
+        }
     }
 
     /// Poll async channels and update state. Call on each event loop tick.
@@ -1363,6 +1379,7 @@ impl App {
                         self.renderer.selected_block = None;
                         self.selected_block = None;
                         self.renderer.viewport.scroll_offset = 0.0;
+                        self.renderer.viewport.pinned_to_bottom = true;
                         self.agent_context_watermark = 0;
                         self.supervisor.reset_all_conversations();
                         return;
@@ -1415,7 +1432,9 @@ impl App {
         let _ = BlockStore::new(&self.store).insert(&block);
         self.blocks.push(block);
         self.renderer.blocks = self.blocks.clone();
-        self.renderer.scroll_to_bottom();
+        if self.renderer.viewport.pinned_to_bottom {
+            self.renderer.scroll_to_bottom();
+        }
     }
 
     fn append_agent_text(&mut self, agent_id: &beyonder_core::AgentId, text: &str) {

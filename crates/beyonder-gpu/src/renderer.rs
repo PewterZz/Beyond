@@ -20,8 +20,10 @@ use crate::block_renderers::{
 use crate::pipeline::{RectInstance, RectPipeline};
 use crate::viewport::Viewport;
 
-/// Height of the fixed input bar at the bottom of the window.
+/// Minimum height of the input bar (one text line + pills + mode pill + padding).
 const INPUT_BAR_HEIGHT: f32 = 120.0;
+/// Maximum number of visible lines in the input text area before it scrolls.
+const MAX_INPUT_LINES: usize = 4;
 /// Horizontal padding around the block stream.
 const PADDING: f32 = 4.0;
 /// Vertical gap between blocks.
@@ -62,6 +64,11 @@ pub struct Renderer {
     pub input_cursor: usize,
     pub input_all_selected: bool,
     pub input_mode_prefix: String,
+
+    /// Cached dynamic bar height in physical pixels — updated once per frame.
+    computed_bar_h: f32,
+    /// Pixel scroll offset applied to the input text (keeps cursor visible when > MAX_INPUT_LINES).
+    input_scroll_px: f32,
 
     /// Selected block index — highlighted on screen, text copyable via Cmd+C.
     pub selected_block: Option<usize>,
@@ -131,17 +138,29 @@ struct TextBufList {
     entries: Vec<(GlyphBuffer, f32, f32, f32, f32, GlyphColor)>,
     /// (block_id, content_len, buf_w_bits, pf_bits, viewport_h_bits)
     keys: Vec<Option<(beyonder_core::BlockId, u64, u32, u32, u32)>>,
+    /// Per-entry explicit clip rect override (clip_top, clip_bottom). When Some,
+    /// overrides the default derivation from (y, y+h). Used for scrolled buffers
+    /// where TextArea.top is shifted but the visible clip window differs.
+    clip_overrides: Vec<Option<(i32, i32)>>,
 }
 
 impl TextBufList {
     fn new() -> Self {
-        Self { entries: vec![], keys: vec![] }
+        Self { entries: vec![], keys: vec![], clip_overrides: vec![] }
     }
 
     /// Push a non-cached entry (tuple matches Vec::push call sites unchanged).
     fn push(&mut self, entry: (GlyphBuffer, f32, f32, f32, f32, GlyphColor)) {
         self.entries.push(entry);
         self.keys.push(None);
+        self.clip_overrides.push(None);
+    }
+
+    /// Push with an explicit clip rect (clip_top, clip_bottom) in physical pixels.
+    fn push_clipped(&mut self, entry: (GlyphBuffer, f32, f32, f32, f32, GlyphColor), clip: (i32, i32)) {
+        self.entries.push(entry);
+        self.keys.push(None);
+        self.clip_overrides.push(Some(clip));
     }
 
     /// Push a cacheable entry alongside its invalidation key.
@@ -152,6 +171,7 @@ impl TextBufList {
     ) {
         self.entries.push(entry);
         self.keys.push(Some(key));
+        self.clip_overrides.push(None);
     }
 
     fn len(&self) -> usize {
@@ -274,6 +294,9 @@ impl Renderer {
             input_cursor: 0,
             input_all_selected: false,
             input_mode_prefix: "> ".to_string(),
+            computed_bar_h: INPUT_BAR_HEIGHT * scale_factor,
+            input_scroll_px: 0.0,
+
             selected_block: None,
             selected_sub_output: false,
             input_running: false,
@@ -309,7 +332,7 @@ impl Renderer {
         self.surface_config.width = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
-        self.viewport.resize(width as f32, height as f32 - INPUT_BAR_HEIGHT * self.scale_factor);
+        self.viewport.resize(width as f32, height as f32 - self.computed_bar_h);
         self.rect_pipeline.update_screen_size(&self.queue, width as f32, height as f32);
         self.glyph_viewport.update(
             &self.queue,
@@ -462,7 +485,129 @@ impl Renderer {
 
     /// Physical height of the input bar in pixels.
     pub fn bar_height_phys(&self) -> f32 {
-        INPUT_BAR_HEIGHT * self.scale_factor
+        self.computed_bar_h
+    }
+
+    /// Physical (width, height) of the surface in pixels.
+    pub fn surface_size(&self) -> (f32, f32) {
+        (self.surface_config.width as f32, self.surface_config.height as f32)
+    }
+
+    /// Scroll the input text viewport by `delta` physical pixels (positive = down / toward newer text).
+    /// Clamped between 0 and max scroll. Call this when the user scrolls over the input bar.
+    pub fn scroll_input(&mut self, delta: f32) {
+        let sc = self.scale_factor;
+        let phys_font = self.font_size * sc;
+        let win_w = self.surface_config.width as f32;
+        let h_pad = 14.0 * sc;
+        let text_w = (win_w - h_pad * 2.0).max(1.0);
+        let line_h = phys_font * 1.4;
+        let (total_lines, _) = self.measure_input_lines(text_w, phys_font);
+        let visible_lines = total_lines.min(MAX_INPUT_LINES);
+        let max_scroll = ((total_lines as f32 - visible_lines as f32) * line_h).max(0.0);
+        self.input_scroll_px = (self.input_scroll_px + delta).clamp(0.0, max_scroll);
+    }
+
+    /// Snap input scroll back so the cursor is visible (call after any cursor-moving keystroke).
+    pub fn snap_input_scroll_to_cursor(&mut self) {
+        let sc = self.scale_factor;
+        let phys_font = self.font_size * sc;
+        let win_w = self.surface_config.width as f32;
+        let h_pad = 14.0 * sc;
+        let text_w = (win_w - h_pad * 2.0).max(1.0);
+        let line_h = phys_font * 1.4;
+        let (total_lines, cursor_line) = self.measure_input_lines(text_w, phys_font);
+        let visible_lines = total_lines.min(MAX_INPUT_LINES);
+        let viewport_h = visible_lines as f32 * line_h;
+        let cursor_top = cursor_line as f32 * line_h;
+        let cursor_bot = cursor_top + line_h;
+        if cursor_top < self.input_scroll_px {
+            self.input_scroll_px = cursor_top;
+        }
+        if cursor_bot > self.input_scroll_px + viewport_h {
+            self.input_scroll_px = cursor_bot - viewport_h;
+        }
+        let max_scroll = ((total_lines as f32 - visible_lines as f32) * line_h).max(0.0);
+        self.input_scroll_px = self.input_scroll_px.clamp(0.0, max_scroll);
+    }
+
+    /// Measure how many visual lines the current input text produces when wrapped to text_w,
+    /// and which visual line the cursor is on. Returns (total_visual_lines, cursor_visual_line).
+    fn measure_input_lines(&mut self, text_w: f32, phys_font: f32) -> (usize, usize) {
+        if self.input_text.is_empty() || self.input_running {
+            return (1, 0);
+        }
+        let cursor = self.input_cursor.min(self.input_text.len());
+        let before = &self.input_text[..cursor];
+        let after = &self.input_text[cursor..];
+        let text = if self.input_all_selected {
+            format!("{}█{}", self.input_mode_prefix, self.input_text)
+        } else {
+            format!("{}{}▌{}", self.input_mode_prefix, before, after)
+        };
+
+        // Byte position of the caret (▌ is 3 UTF-8 bytes; █ is 3 bytes too)
+        let prefix_len = self.input_mode_prefix.len();
+        let caret_byte_end = if self.input_all_selected {
+            // select-all: cursor conceptually at the end
+            text.len()
+        } else {
+            prefix_len + cursor + "▌".len()
+        };
+
+        let col = GlyphColor::rgb(205, 214, 244);
+        let buf = self.make_buffer(&text, text_w, phys_font, col);
+
+        let mut total_lines = 0usize;
+        let mut cursor_line = 0usize;
+
+        for run in buf.layout_runs() {
+            let run_end = run.glyphs.last().map(|g| g.end).unwrap_or(0);
+            // If this run ends before the caret, the cursor is on a later line.
+            if run_end < caret_byte_end {
+                cursor_line = total_lines + 1;
+            }
+            total_lines += 1;
+        }
+        // Clamp cursor_line in case it went one past due to the loop logic
+        let cursor_line = cursor_line.min(total_lines.saturating_sub(1));
+
+        (total_lines.max(1), cursor_line)
+    }
+
+    /// Recompute `computed_bar_h` and `input_scroll_px` based on current input state.
+    /// Call once per frame before `append_bar_rects` and `build_bar_text_buffers`.
+    fn compute_bar_state(&mut self) {
+        let sc = self.scale_factor;
+        let phys_font = self.font_size * sc;
+        let win_w = self.surface_config.width as f32;
+        let h_pad = 14.0 * sc;
+        let text_w = (win_w - h_pad * 2.0).max(1.0);
+        let line_h = phys_font * 1.4;
+
+        let (total_lines, cursor_line) = self.measure_input_lines(text_w, phys_font);
+        let visible_lines = total_lines.min(MAX_INPUT_LINES);
+
+        // Bar height = base 1-line height + extra lines.
+        // Base (120 logical) fits exactly 1 line with centering margins.
+        let line_h_logical = self.font_size * 1.4;
+        let extra_lines = (visible_lines as f32 - 1.0).max(0.0);
+        let bar_h_logical = INPUT_BAR_HEIGHT + extra_lines * line_h_logical;
+        self.computed_bar_h = bar_h_logical * sc;
+
+        // Clamp scroll to valid range (content may have shrunk).
+        let max_scroll = ((total_lines as f32 - visible_lines as f32) * line_h).max(0.0);
+        self.input_scroll_px = self.input_scroll_px.clamp(0.0, max_scroll);
+
+        if total_lines > 1 {
+            tracing::info!(
+                total_lines,
+                cursor_line,
+                visible_lines,
+                input_scroll_px = self.input_scroll_px,
+                "input bar state"
+            );
+        }
     }
 
     /// Terminal grid dimensions for TUI fullscreen mode (bar hidden — full window).
@@ -502,6 +647,15 @@ impl Renderer {
             self.spinner_last_tick = now;
         }
 
+        // Recompute dynamic bar height and scroll offset.
+        let old_bar_h = self.computed_bar_h;
+        self.compute_bar_state();
+        if (self.computed_bar_h - old_bar_h).abs() > 0.5 {
+            let w = self.surface_config.width as f32;
+            let h = self.surface_config.height as f32;
+            self.viewport.resize(w, h - self.computed_bar_h);
+        }
+
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -524,7 +678,7 @@ impl Renderer {
         let mut rects = if !self.tui_active {
             let (mut r, total_h) = self.layout_blocks();
             self.viewport.total_content_height = total_h;
-            if self.running_block_idx.is_some() {
+            if self.running_block_idx.is_some() && self.viewport.pinned_to_bottom {
                 self.viewport.scroll_to_bottom();
             }
             r
@@ -557,27 +711,30 @@ impl Renderer {
             let bar_texts = self.build_bar_text_buffers();
             buf_list.entries.extend(bar_texts.entries);
             buf_list.keys.extend(bar_texts.keys);
+            buf_list.clip_overrides.extend(bar_texts.clip_overrides);
         }
         debug!(entries = buf_list.entries.len(), "render: text buffers built");
-        let sc = self.scale_factor;
         let win_h = self.surface_config.height as f32;
         // When the bar is hidden, text fills the full window.
         // When visible, text must not render over the input bar.
         let text_clip_bottom = if bar_hidden {
             win_h
         } else {
-            win_h - INPUT_BAR_HEIGHT * sc
+            win_h - self.computed_bar_h
         };
         let text_areas: Vec<TextArea> = buf_list.entries
             .iter()
             .enumerate()
             .map(|(i, (buf, x, y, w, h, color))| {
                 // Block stream entries are clipped at the bar boundary.
-                // Bar text (indices beyond block_entry_count) is unclamped.
-                let clip_bottom = if i < block_entry_count {
-                    ((*y + *h) as i32).min(text_clip_bottom as i32)
+                // Bar text uses (y, y+h) unless a clip override was provided
+                // (e.g. scrolled input text where TextArea.top is shifted).
+                let (clip_top, clip_bottom) = if let Some((ct, cb)) = buf_list.clip_overrides[i] {
+                    (ct, cb)
+                } else if i < block_entry_count {
+                    ((*y as i32).max(0), ((*y + *h) as i32).min(text_clip_bottom as i32))
                 } else {
-                    (*y + *h) as i32
+                    ((*y as i32).max(0), (*y + *h) as i32)
                 };
                 TextArea {
                     buffer: buf,
@@ -586,7 +743,7 @@ impl Renderer {
                     scale: 1.0,
                     bounds: TextBounds {
                         left: (*x as i32).max(0),
-                        top: (*y as i32).max(0),
+                        top: clip_top,
                         right: (*x + *w) as i32,
                         bottom: clip_bottom,
                     },
@@ -806,7 +963,7 @@ impl Renderer {
     fn append_bar_rects(&mut self, rects: &mut Vec<RectInstance>) {
         let win_w = self.surface_config.width as f32;
         let win_h = self.surface_config.height as f32;
-        let bar_h = INPUT_BAR_HEIGHT * self.scale_factor;
+        let bar_h = self.computed_bar_h;
         let bar_y = win_h - bar_h;
         let sc = self.scale_factor;
         let phys_font = self.font_size * sc;
@@ -1278,7 +1435,7 @@ impl Renderer {
         let phys_font = self.font_size * sc;
         let win_w = self.surface_config.width as f32;
         let win_h = self.surface_config.height as f32;
-        let bar_h = INPUT_BAR_HEIGHT * sc;
+        let bar_h = self.computed_bar_h;
         let bar_y = win_h - bar_h;
         let h_pad = 14.0 * sc;
         let text_x = h_pad;
@@ -1322,8 +1479,54 @@ impl Renderer {
                 let t = format!("{}{}{}{}", self.input_mode_prefix, before, caret, after);
                 (t, GlyphColor::rgb(205, 214, 244))
             };
-            let buf = self.make_buffer(&text, text_w, phys_font, col);
-            results.push((buf, text_x, text_y, text_w, line_h, col));
+
+            let phys_font_local = self.font_size * sc;
+            let line_h_local = phys_font_local * 1.4;
+            let visible_lines = self.measure_input_lines(text_w, phys_font_local).0
+                .min(MAX_INPUT_LINES);
+            let text_area_h = visible_lines as f32 * line_h_local;
+
+            // Multi-line centering: place the text block vertically centred in the
+            // remaining space between the pills row and the mode pill.
+            let remaining_h = bar_h - (text_zone_top - bar_y) - mode_zone_h;
+            let text_block_y = text_zone_top + (remaining_h - text_area_h).max(0.0) * 0.5;
+
+            // Bounded buffer + set_scroll: layout_runs() subtracts scroll.vertical
+            // from each run's Y, so visible lines have Y ∈ [0, text_area_h] and
+            // pre-scroll lines have negative Y. TextArea.top = text_block_y maps
+            // visible lines to screen [text_block_y, text_block_y+text_area_h].
+            // Clip tightly to that range so negative-Y runs don't bleed into pills.
+            let metrics = glyphon::Metrics::new(phys_font, phys_font * 1.4);
+            let mut buf = GlyphBuffer::new(&mut self.font_system, metrics);
+            buf.set_size(&mut self.font_system, Some(text_w), Some(text_area_h));
+            buf.set_text(
+                &mut self.font_system,
+                &text,
+                glyphon::Attrs::new()
+                    .family(glyphon::Family::Name("JetBrainsMono Nerd Font"))
+                    .color(col),
+                glyphon::Shaping::Advanced,
+            );
+            buf.set_scroll(glyphon::cosmic_text::Scroll {
+                line: 0,
+                vertical: self.input_scroll_px,
+                horizontal: 0.0,
+            });
+            buf.shape_until_scroll(&mut self.font_system, false);
+            let run_tops: Vec<f32> = buf.layout_runs().map(|r| r.line_top).collect();
+            let clip_top = text_block_y as i32;
+            let clip_bottom = (text_block_y + text_area_h) as i32;
+            tracing::info!(
+                input_scroll_px = self.input_scroll_px,
+                text_block_y,
+                text_area_h,
+                clip_top,
+                clip_bottom,
+                visible_lines,
+                ?run_tops,
+                "bar text layout"
+            );
+            results.push_clipped((buf, text_x, text_block_y, text_w, text_area_h, col), (clip_top, clip_bottom));
         }
 
         // Pill text — one entry per pill.
