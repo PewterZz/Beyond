@@ -81,7 +81,10 @@ impl ProviderConfig {
 /// Top-level Beyonder configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeyonderConfig {
-    pub theme: ThemeConfig,
+    /// Name of the active theme — resolved against the built-in palette list.
+    /// Unknown names fall back to `mocha`.
+    #[serde(default = "default_theme_name")]
+    pub theme: String,
     pub font: FontConfig,
     pub shell: ShellConfig,
     pub data_dir: PathBuf,
@@ -91,12 +94,14 @@ pub struct BeyonderConfig {
     pub provider: ProviderConfig,
 }
 
+fn default_theme_name() -> String { "mocha".to_string() }
+
 fn default_model() -> String { "qwen2.5-coder:7b".to_string() }
 
 impl Default for BeyonderConfig {
     fn default() -> Self {
         Self {
-            theme: ThemeConfig::default(),
+            theme: default_theme_name(),
             font: FontConfig::default(),
             shell: ShellConfig::default(),
             data_dir: default_data_dir(),
@@ -119,6 +124,11 @@ impl BeyonderConfig {
         }
     }
 
+    /// Resolve the named theme to a concrete `Theme` palette.
+    pub fn resolved_theme(&self) -> crate::theme::Theme {
+        crate::theme::theme_by_name(&self.theme)
+    }
+
     pub fn db_path(&self) -> PathBuf {
         self.data_dir.join("beyonder.db")
     }
@@ -131,27 +141,6 @@ impl BeyonderConfig {
         let toml_str = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
         std::fs::write(&path, toml_str)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThemeConfig {
-    pub background: [f32; 3],
-    pub foreground: [f32; 3],
-    pub block_border: [f32; 3],
-    pub agent_accent: [f32; 3],
-    pub approval_accent: [f32; 3],
-}
-
-impl Default for ThemeConfig {
-    fn default() -> Self {
-        Self {
-            background: [0.08, 0.08, 0.10],
-            foreground: [0.90, 0.90, 0.90],
-            block_border: [0.20, 0.20, 0.25],
-            agent_accent: [0.30, 0.55, 0.90],
-            approval_accent: [0.90, 0.60, 0.15],
-        }
     }
 }
 
@@ -195,7 +184,7 @@ pub fn beyonder_dir() -> PathBuf {
     PathBuf::from(home).join(".config").join("beyond")
 }
 
-fn config_path() -> PathBuf {
+pub fn config_path() -> PathBuf {
     beyonder_dir().join("config.toml")
 }
 

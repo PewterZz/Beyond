@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use ulid::Ulid;
 
-use crate::{AgentId, ProvenanceChain, SessionId};
+use crate::{AgentId, ProvenanceChain, SessionId, UnderlineStyle};
 
 /// Unique, time-sortable block identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -169,12 +169,56 @@ pub struct TerminalRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalCell {
-    pub character: char,
+    #[serde(default, alias = "character", deserialize_with = "deser_grapheme_compat")]
+    pub grapheme: String,
     pub fg: Option<Color>,
     pub bg: Option<Color>,
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
+    #[serde(default, deserialize_with = "deser_underline_compat")]
+    pub underline: UnderlineStyle,
+    #[serde(default)]
+    pub strikethrough: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
+}
+
+/// Accepts either a single `char` (legacy format) or a `String` grapheme cluster.
+fn deser_grapheme_compat<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Ch(char),
+        Str(String),
+    }
+    match Either::deserialize(deserializer)? {
+        Either::Ch(c) => Ok(c.to_string()),
+        Either::Str(s) => Ok(s),
+    }
+}
+
+/// Backward-compatible deserializer: accepts either the legacy `bool` form
+/// (old DB rows where `underline` was a plain flag) or the new enum form.
+fn deser_underline_compat<'de, D>(deserializer: D) -> Result<UnderlineStyle, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Bool(bool),
+        Style(UnderlineStyle),
+    }
+    match Either::deserialize(deserializer)? {
+        Either::Bool(true) => Ok(UnderlineStyle::Single),
+        Either::Bool(false) => Ok(UnderlineStyle::None),
+        Either::Style(s) => Ok(s),
+    }
 }
 
 /// 24-bit RGB color.

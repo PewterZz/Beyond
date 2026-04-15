@@ -21,6 +21,7 @@ pub static COMMANDS: &[SlashCommand] = &[
     SlashCommand { name: "exit",    usage: "/exit",           description: "Exit Beyond" },
     SlashCommand { name: "scroll",  usage: "/scroll top|bottom", description: "Jump to top or bottom of block stream" },
     SlashCommand { name: "font",    usage: "/font <size>",    description: "Set font size (e.g. /font 14)" },
+    SlashCommand { name: "find",    usage: "/find <pattern>", description: "Search blocks with a regex (Cmd+F also toggles)" },
 
     // ── Agent ─────────────────────────────────────────────────────────────────
     SlashCommand { name: "agent",   usage: "/agent list|spawn <name>|kill <id>", description: "Manage running agents" },

@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
-use winit::event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, KeyEvent, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
 
@@ -190,7 +190,7 @@ fn block_to_text(block: &Block) -> String {
         BlockContent::ShellCommand { input, output, .. } => {
             let mut s = format!("$ {input}\n");
             for row in &output.rows {
-                let line: String = row.cells.iter().map(|c| c.character).collect();
+                let line: String = row.cells.iter().map(|c| c.grapheme.as_str()).collect();
                 s.push_str(&line);
                 s.push('\n');
             }
@@ -225,7 +225,7 @@ fn format_blocks_as_context(blocks: &[Block], watermark: usize) -> String {
             BlockContent::ShellCommand { input, output, exit_code, .. } => {
                 let mut entry = format!("$ {}\n", input.trim());
                 let mut lines: Vec<String> = output.rows.iter().map(|row| {
-                    let line: String = row.cells.iter().map(|c| c.character).collect();
+                    let line: String = row.cells.iter().map(|c| c.grapheme.as_str()).collect();
                     line.trim_end().to_string()
                 }).filter(|l| !l.is_empty()).collect();
                 // Truncate very long outputs so context stays token-efficient.
@@ -358,6 +358,10 @@ pub struct App {
     prev_tui_active: bool,
     /// Sub-line accumulator for smooth mouse-wheel scrolling in TUI mode.
     scroll_accum: f32,
+    /// Currently pressed mouse button for SGR drag reporting.
+    mouse_button_down: Option<winit::event::MouseButton>,
+    /// Last cell (1-based col, row) forwarded to the PTY, for motion de-duping.
+    last_mouse_cell: Option<(u32, u32)>,
 
     // Context pill state
     pub conda_envs: Vec<String>,
@@ -398,11 +402,38 @@ pub struct App {
     pub active_tab: usize,
     /// Displayable titles for each tab (synced to renderer before each frame).
     pub tab_titles: Vec<String>,
+
+    /// Window handle — retained so IME cursor-area updates can be pushed on
+    /// every caret-move. Rendering already holds its own Arc internally.
+    window: Arc<Window>,
+    /// Active IME preedit (composition) text — not yet committed to the editor.
+    pub ime_preedit: String,
+    /// Optional IME cursor range within `ime_preedit` (byte offsets).
+    pub ime_preedit_cursor: Option<(usize, usize)>,
+
+    /// Receives a unit signal whenever the config file on disk changes.
+    /// The sender half lives inside a `notify::RecommendedWatcher` retained on
+    /// `_config_watcher` so it isn't dropped.
+    config_reload_rx: Option<std::sync::mpsc::Receiver<()>>,
+    _config_watcher: Option<notify::RecommendedWatcher>,
+
+    // ── Scrollback search ─────────────────────────────────────────────────────
+    /// Active search pattern buffer. `Some` iff in search mode.
+    pub search_pattern: Option<String>,
+    /// Matched block indices (into `self.blocks`) for the current pattern.
+    pub search_matches: Vec<usize>,
+    /// Index (within `search_matches`) of the currently focused match.
+    pub search_current: Option<usize>,
+    /// Saved input text to restore on search-mode exit.
+    pub search_saved_input: String,
 }
 
 impl App {
     pub async fn new(window: Arc<Window>, config: BeyonderConfig) -> Result<Self> {
-        let renderer = Renderer::new(Arc::clone(&window)).await?;
+        let mut renderer = Renderer::new(Arc::clone(&window)).await?;
+        renderer.set_theme(config.resolved_theme());
+        // Enable IME so winit delivers WindowEvent::Ime (preedit/commit) events.
+        window.set_ime_allowed(true);
 
         // Open data store.
         std::fs::create_dir_all(&config.data_dir)?;
@@ -451,6 +482,55 @@ impl App {
         let active_model = config.model.clone();
         let active_provider = config.provider.name().to_string();
 
+        // ── Config file watcher ─────────────────────────────────────────────
+        // Watch the config file's parent dir (not the file itself) so that
+        // atomic-rename editors like vim still trigger events. Events are
+        // normalised to a unit signal — the tick() handler re-reads the file.
+        let (config_reload_rx, config_watcher) = {
+            use notify::{Event, EventKind, RecursiveMode, Watcher};
+            let cfg_path = beyonder_config::config_path();
+            let cfg_dir = cfg_path.parent().map(|p| p.to_path_buf());
+            let cfg_name = cfg_path.file_name().map(|n| n.to_os_string());
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let watcher_tx = tx.clone();
+            let cfg_name_cb = cfg_name.clone();
+            let result = notify::recommended_watcher(move |res: notify::Result<Event>| {
+                if let Ok(ev) = res {
+                    if !matches!(
+                        ev.kind,
+                        EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                    ) {
+                        return;
+                    }
+                    let touches_cfg = match &cfg_name_cb {
+                        Some(name) => ev.paths.iter().any(|p| p.file_name() == Some(name)),
+                        None => true,
+                    };
+                    if touches_cfg {
+                        let _ = watcher_tx.send(());
+                    }
+                }
+            });
+            match (result, cfg_dir) {
+                (Ok(mut w), Some(dir)) => {
+                    // Ensure the parent dir exists so the watcher has something to attach to.
+                    let _ = std::fs::create_dir_all(&dir);
+                    match w.watch(&dir, RecursiveMode::NonRecursive) {
+                        Ok(()) => (Some(rx), Some(w)),
+                        Err(e) => {
+                            warn!("Config watcher failed to start: {e}");
+                            (None, None)
+                        }
+                    }
+                }
+                (Err(e), _) => {
+                    warn!("Could not create config watcher: {e}");
+                    (None, None)
+                }
+                _ => (None, None),
+            }
+        };
+
         Ok(Self {
             renderer,
             input: InputEditor::new(),
@@ -472,6 +552,8 @@ impl App {
             command_running: false,
             prev_tui_active: false,
             scroll_accum: 0.0,
+            mouse_button_down: None,
+            last_mouse_cell: None,
             current_conda: current_conda_env(),
             current_node: current_node_version(),
             conda_envs: fetch_conda_envs(),
@@ -491,6 +573,15 @@ impl App {
             tabs: vec![None],
             active_tab: 0,
             tab_titles: vec!["1".to_string()],
+            window,
+            ime_preedit: String::new(),
+            ime_preedit_cursor: None,
+            config_reload_rx,
+            _config_watcher: config_watcher,
+            search_pattern: None,
+            search_matches: vec![],
+            search_current: None,
+            search_saved_input: String::new(),
         })
     }
 
@@ -715,10 +806,49 @@ impl App {
                         *h = hovered;
                     }
                 }
+                // SGR mouse motion / drag forwarding while a TUI is active.
+                if self.renderer.tui_active {
+                    let mr = self.term_grid.mouse_report_mode();
+                    if mr.sgr && (mr.motion || (mr.drag && self.mouse_button_down.is_some())) {
+                        if let Some((cx, cy)) = self.renderer.cell_at_phys(self.cursor_pos.0, self.cursor_pos.1) {
+                            if self.last_mouse_cell != Some((cx, cy)) {
+                                self.last_mouse_cell = Some((cx, cy));
+                                let btn = self.mouse_button_down;
+                                let cb = sgr_button_code(btn, false, false) + 32 + self.modifier_bits();
+                                let seq = format!("\x1b[<{cb};{cx};{cy}M");
+                                self.write_to_pty(&seq);
+                            }
+                        }
+                    }
+                }
                 false
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: winit::event::MouseButton::Left, .. } => {
-                self.handle_click(self.cursor_pos);
+            WindowEvent::MouseInput { state, button, .. } => {
+                if *state == ElementState::Pressed {
+                    self.mouse_button_down = Some(*button);
+                }
+                // SGR mouse press/release forwarding.
+                if self.renderer.tui_active {
+                    let mr = self.term_grid.mouse_report_mode();
+                    if mr.sgr && mr.any() {
+                        if let Some((cx, cy)) = self.renderer.cell_at_phys(self.cursor_pos.0, self.cursor_pos.1) {
+                            let cb = sgr_button_code(Some(*button), false, false) + self.modifier_bits();
+                            let trailer = if *state == ElementState::Pressed { 'M' } else { 'm' };
+                            let seq = format!("\x1b[<{cb};{cx};{cy}{trailer}");
+                            self.write_to_pty(&seq);
+                            if *state == ElementState::Released {
+                                self.mouse_button_down = None;
+                            }
+                            return false;
+                        }
+                    }
+                }
+                if *state == ElementState::Released {
+                    self.mouse_button_down = None;
+                }
+                if *state == ElementState::Pressed && *button == winit::event::MouseButton::Left {
+                    self.handle_click(self.cursor_pos);
+                }
                 false
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -736,6 +866,27 @@ impl App {
                     MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / px_div,
                 };
                 self.scroll_accum += lines_up;
+                // If the TUI has requested mouse reporting, forward wheel as SGR
+                // events at the cursor position instead of scrolling the grid.
+                if self.renderer.tui_active {
+                    let mr = self.term_grid.mouse_report_mode();
+                    if mr.sgr && mr.any() {
+                        let step = self.scroll_accum.trunc() as i32;
+                        if step != 0 {
+                            self.scroll_accum -= step as f32;
+                            if let Some((cx, cy)) = self.renderer.cell_at_phys(self.cursor_pos.0, self.cursor_pos.1) {
+                                let cb_base = if step > 0 { 64 } else { 65 };
+                                let cb = cb_base + self.modifier_bits();
+                                let count = step.abs();
+                                for _ in 0..count {
+                                    let seq = format!("\x1b[<{cb};{cx};{cy}M");
+                                    self.write_to_pty(&seq);
+                                }
+                            }
+                        }
+                        return false;
+                    }
+                }
                 // In a full-screen TUI (claude, nvim, etc.) blocks don't scroll.
                 // Move the terminal's display_offset so the user can scroll back
                 // through the primary-screen history. No-op in alt-screen apps
@@ -765,9 +916,44 @@ impl App {
                 }
                 false
             }
+            WindowEvent::Focused(gained) => {
+                if self.renderer.tui_active && self.term_grid.focus_reporting_enabled() {
+                    let seq = if *gained { "\x1b[I" } else { "\x1b[O" };
+                    self.write_to_pty(seq);
+                }
+                false
+            }
+            WindowEvent::Ime(ime) => {
+                match ime {
+                    Ime::Enabled | Ime::Disabled => {
+                        self.ime_preedit.clear();
+                        self.ime_preedit_cursor = None;
+                    }
+                    Ime::Preedit(text, cursor) => {
+                        self.ime_preedit = text.clone();
+                        self.ime_preedit_cursor = *cursor;
+                    }
+                    Ime::Commit(text) => {
+                        self.ime_preedit.clear();
+                        self.ime_preedit_cursor = None;
+                        self.input.insert_text(text);
+                        self.renderer.snap_input_scroll_to_cursor();
+                    }
+                }
+                false
+            }
             WindowEvent::CloseRequested => true,
             _ => false,
         }
+    }
+
+    /// Modifier mask bits used in SGR mouse Cb (+4 shift, +8 alt, +16 ctrl).
+    fn modifier_bits(&self) -> u32 {
+        let mut b = 0u32;
+        if self.modifiers.shift_key() { b += 4; }
+        if self.modifiers.alt_key()   { b += 8; }
+        if self.modifiers.control_key() { b += 16; }
+        b
     }
 
     fn key_to_pty_bytes(&self, event: &KeyEvent) -> Option<Vec<u8>> {
@@ -893,6 +1079,14 @@ impl App {
     }
 
     fn handle_click(&mut self, pos: (f32, f32)) {
+        // OSC 8 hyperlink click — open in default browser.
+        for (rect, url) in &self.renderer.link_rects {
+            let [rx, ry, rw, rh] = *rect;
+            if pos.0 >= rx && pos.0 < rx + rw && pos.1 >= ry && pos.1 < ry + rh {
+                let _ = open::that(url);
+                return;
+            }
+        }
         // Tab strip click — switch to clicked tab.
         if let Some(tab_idx) = self.renderer.tab_hit(pos.0, pos.1) {
             self.switch_tab(tab_idx);
@@ -1057,6 +1251,70 @@ impl App {
         // Any non-Tab keypress invalidates the active completion cycle.
         if !matches!(event.logical_key, Key::Named(NamedKey::Tab)) {
             self.completion_cycle = None;
+        }
+
+        // Cmd+F (macOS) / Ctrl+F (other) — toggle scrollback search mode.
+        let super_or_ctrl_find = if cfg!(target_os = "macos") {
+            self.modifiers.super_key()
+        } else {
+            self.modifiers.control_key()
+        };
+        if super_or_ctrl_find {
+            if let Key::Character(s) = &event.logical_key {
+                if s.as_str() == "f" {
+                    if self.search_pattern.is_some() {
+                        self.exit_search_mode();
+                    } else {
+                        self.enter_search_mode("");
+                    }
+                    return;
+                }
+            }
+        }
+
+        // While in search mode, route keystrokes to pattern editing + navigation.
+        if self.search_pattern.is_some() {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.exit_search_mode();
+                    return;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    if self.modifiers.shift_key() {
+                        self.prev_match();
+                    } else {
+                        self.next_match();
+                    }
+                    return;
+                }
+                Key::Named(NamedKey::F3) => {
+                    if self.modifiers.shift_key() { self.prev_match(); } else { self.next_match(); }
+                    return;
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    self.input.delete_backward();
+                    self.update_search_matches();
+                    self.renderer.snap_input_scroll_to_cursor();
+                    return;
+                }
+                Key::Named(NamedKey::ArrowLeft) => { self.input.move_left(); self.renderer.snap_input_scroll_to_cursor(); return; }
+                Key::Named(NamedKey::ArrowRight) => { self.input.move_right(); self.renderer.snap_input_scroll_to_cursor(); return; }
+                Key::Named(NamedKey::ArrowUp) => { self.prev_match(); return; }
+                Key::Named(NamedKey::ArrowDown) => { self.next_match(); return; }
+                Key::Character(s) => {
+                    for ch in s.chars() { self.input.insert(ch); }
+                    self.update_search_matches();
+                    self.renderer.snap_input_scroll_to_cursor();
+                    return;
+                }
+                Key::Named(NamedKey::Space) => {
+                    self.input.insert(' ');
+                    self.update_search_matches();
+                    self.renderer.snap_input_scroll_to_cursor();
+                    return;
+                }
+                _ => {}
+            }
         }
 
         // Cmd+V (macOS) / Ctrl+V (other) — paste from clipboard.
@@ -1243,7 +1501,7 @@ impl App {
                 if self.selected_sub_output {
                     // Copy only the output rows.
                     output.rows.iter()
-                        .map(|row| row.cells.iter().map(|c| c.character).collect::<String>())
+                        .map(|row| row.cells.iter().map(|c| c.grapheme.as_str()).collect::<String>())
                         .collect::<Vec<_>>()
                         .join("\n")
                 } else {
@@ -1257,6 +1515,116 @@ impl App {
         if let Ok(mut clipboard) = arboard::Clipboard::new() {
             let _ = clipboard.set_text(text);
         }
+    }
+
+    // ── Scrollback search ─────────────────────────────────────────────────────
+
+    fn block_search_text(block: &Block) -> String {
+        match &block.content {
+            BlockContent::ShellCommand { input, output, .. } => {
+                let mut s = input.clone();
+                s.push('\n');
+                for row in &output.rows {
+                    for cell in &row.cells {
+                        s.push_str(cell.grapheme.as_str());
+                    }
+                    s.push('\n');
+                }
+                s
+            }
+            BlockContent::AgentMessage { content_blocks, .. } => {
+                content_blocks.iter().map(|cb| match cb {
+                    beyonder_core::ContentBlock::Text { text } => text.clone(),
+                    beyonder_core::ContentBlock::Code { code, .. } => code.clone(),
+                    beyonder_core::ContentBlock::Thinking { thinking } => thinking.clone(),
+                }).collect::<Vec<_>>().join("\n")
+            }
+            BlockContent::Text { text } => text.clone(),
+            BlockContent::ToolCall { tool_name, input, output, streaming_text, error, .. } => {
+                let mut s = tool_name.clone();
+                s.push(' ');
+                s.push_str(&input.to_string());
+                if let Some(o) = output { s.push('\n'); s.push_str(o); }
+                if let Some(st) = streaming_text { s.push('\n'); s.push_str(st); }
+                if let Some(e) = error { s.push('\n'); s.push_str(e); }
+                s
+            }
+            _ => String::new(),
+        }
+    }
+
+    pub fn enter_search_mode(&mut self, prefill: &str) {
+        if self.search_pattern.is_none() {
+            self.search_saved_input = self.input.text.clone();
+        }
+        self.search_pattern = Some(prefill.to_string());
+        self.input.select_all();
+        self.input.delete_backward();
+        for ch in prefill.chars() { self.input.insert(ch); }
+        self.update_search_matches();
+    }
+
+    pub fn exit_search_mode(&mut self) {
+        if self.search_pattern.is_none() { return; }
+        self.search_pattern = None;
+        self.search_matches.clear();
+        self.search_current = None;
+        self.input.select_all();
+        self.input.delete_backward();
+        let saved = std::mem::take(&mut self.search_saved_input);
+        for ch in saved.chars() { self.input.insert(ch); }
+        self.renderer.snap_input_scroll_to_cursor();
+    }
+
+    fn update_search_matches(&mut self) {
+        let pat = self.input.text.clone();
+        self.search_pattern = Some(pat.clone());
+        self.search_matches.clear();
+        if pat.is_empty() {
+            self.search_current = None;
+            return;
+        }
+        let Some(re) = regex::RegexBuilder::new(&pat).case_insensitive(true).build().ok() else {
+            self.search_current = None;
+            return;
+        };
+        for (i, block) in self.blocks.iter().enumerate() {
+            let text = Self::block_search_text(block);
+            if re.is_match(&text) {
+                self.search_matches.push(i);
+            }
+        }
+        self.search_current = if self.search_matches.is_empty() { None } else { Some(0) };
+        self.focus_current_match();
+    }
+
+    fn focus_current_match(&mut self) {
+        let Some(cur) = self.search_current else { return };
+        let Some(&block_idx) = self.search_matches.get(cur) else { return };
+        if let Some(y) = self.renderer.block_top_y(block_idx) {
+            let pad = 16.0 * self.renderer.scale_factor;
+            self.renderer.viewport.scroll_to((y - pad).max(0.0));
+        }
+    }
+
+    pub fn next_match(&mut self) {
+        if self.search_matches.is_empty() { return; }
+        let n = self.search_matches.len();
+        self.search_current = Some(match self.search_current {
+            None => 0,
+            Some(i) => (i + 1) % n,
+        });
+        self.focus_current_match();
+    }
+
+    pub fn prev_match(&mut self) {
+        if self.search_matches.is_empty() { return; }
+        let n = self.search_matches.len();
+        self.search_current = Some(match self.search_current {
+            None => n - 1,
+            Some(i) => (i + n - 1) % n,
+        });
+        self.focus_current_match();
     }
 
     async fn route_input(&mut self, text: String) {
@@ -1570,6 +1938,10 @@ impl App {
             ["/scroll", "bottom"] => {
                 self.renderer.viewport.scroll_to_bottom();
             }
+            ["/find", rest @ ..] => {
+                let pat = rest.join(" ");
+                self.enter_search_mode(&pat);
+            }
             ["/font", size_str] => {
                 if let Ok(size) = size_str.parse::<f32>() {
                     if size >= 8.0 && size <= 48.0 {
@@ -1665,8 +2037,22 @@ impl App {
             ["/session", "list"] => {
                 self.push_text_block(format!("Current session: {:?}", self.session.id));
             }
-            ["/theme", _name] => {
-                self.push_text_block("Theme switching is not yet implemented.".to_string());
+            ["/theme"] => {
+                let current = self.config.theme.clone();
+                let mut lines = vec![format!("Current theme: {}", current), "Available:".to_string()];
+                for name in beyonder_config::BUILTIN_THEMES {
+                    lines.push(format!("  - {}", name));
+                }
+                self.push_text_block(lines.join("\n"));
+            }
+            ["/theme", name] => {
+                let theme = beyonder_config::theme_by_name(name);
+                self.config.theme = theme.name.to_string();
+                if let Err(e) = self.config.save() {
+                    warn!("Failed to save config: {e}");
+                }
+                self.renderer.set_theme(theme);
+                self.push_text_block(format!("Theme: {}", theme.name));
             }
 
             _ => {
@@ -1726,6 +2112,40 @@ impl App {
     }
 
     /// Push a plain text block into the block stream (used for command output).
+    /// Re-read config.toml from disk and diff against the live config.
+    /// Theme changes take effect immediately; model / provider changes apply
+    /// on the next agent spawn (mirrors the `/model` and `/provider` commands).
+    /// Font changes require a restart — a one-shot notice is posted.
+    fn apply_config_reload(&mut self) {
+        let new_config = BeyonderConfig::load_or_default();
+        let mut notes: Vec<String> = Vec::new();
+
+        if new_config.theme != self.config.theme {
+            self.renderer.set_theme(new_config.resolved_theme());
+            notes.push(format!("theme -> {}", new_config.theme));
+        }
+        if new_config.model != self.config.model {
+            self.active_model = new_config.model.clone();
+            notes.push(format!("model -> {} (next spawn)", new_config.model));
+        }
+        let new_provider_name = new_config.provider.name();
+        let old_provider_name = self.config.provider.name();
+        if new_provider_name != old_provider_name {
+            self.active_provider = new_provider_name.to_string();
+            notes.push(format!("provider -> {} (next spawn)", new_provider_name));
+        }
+        if new_config.font.family != self.config.font.family
+            || (new_config.font.size - self.config.font.size).abs() > f32::EPSILON
+        {
+            notes.push("font change requires restart".to_string());
+        }
+
+        self.config = new_config;
+        if !notes.is_empty() {
+            self.push_text_block(format!("Config reloaded: {}", notes.join(", ")));
+        }
+    }
+
     fn push_text_block(&mut self, text: String) {
         use beyonder_core::{BlockContent, BlockId, BlockKind, BlockStatus, ProvenanceChain};
         let now = chrono::Utc::now();
@@ -1750,6 +2170,18 @@ impl App {
 
     /// Poll async channels and update state. Call on each event loop tick.
     pub async fn tick(&mut self) {
+        // Config hot-reload: drain all pending file-watcher events (notify fires
+        // several per save on most platforms). Apply at most one reload per tick.
+        let mut config_changed = false;
+        if let Some(rx) = &self.config_reload_rx {
+            while rx.try_recv().is_ok() {
+                config_changed = true;
+            }
+        }
+        if config_changed {
+            self.apply_config_reload();
+        }
+
         // Drain PTY events.
         let mut pty_output: Vec<Vec<u8>> = vec![];
         let mut pty_exited: Option<Option<u32>> = None;
@@ -2110,11 +2542,21 @@ impl App {
         self.renderer.input_text = self.input.text.clone();
         self.renderer.input_cursor = self.input.cursor;
         self.renderer.input_all_selected = self.input.all_selected;
-        self.renderer.input_mode_prefix = match detect_mode(&self.input.text) {
-            InputMode::Shell => String::new(),
-            InputMode::Agent { name } => format!("@{} ", name),
-            InputMode::Command { .. } => String::new(),
+        self.renderer.input_preedit = self.ime_preedit.clone();
+        self.renderer.input_mode_prefix = if let Some(pat) = &self.search_pattern {
+            let total = self.search_matches.len();
+            let cur = self.search_current.map(|i| i + 1).unwrap_or(0);
+            let _ = pat;
+            format!("find ({}/{}) ", cur, total)
+        } else {
+            match detect_mode(&self.input.text) {
+                InputMode::Shell => String::new(),
+                InputMode::Agent { name } => format!("@{} ", name),
+                InputMode::Command { .. } => String::new(),
+            }
         };
+        self.renderer.search_match_blocks = self.search_matches.clone();
+        self.renderer.search_current_match = self.search_current;
         self.renderer.input_running = self.block_builder.is_running_command();
 
         // Command palette — filter commands by what's been typed after the leading /.
@@ -2150,6 +2592,35 @@ impl App {
                 .to_string(),
         ];
 
-        self.renderer.render()
+        let result = self.renderer.render();
+
+        // Push the current caret rect to the OS IME as the candidate anchor.
+        // Coordinates from the renderer are physical pixels; winit expects
+        // logical pixels so we divide by scale_factor.
+        let [cx, cy, cw, ch] = self.renderer.input_caret_rect;
+        if cw > 0.0 && ch > 0.0 {
+            let sf = self.renderer.scale_factor as f64;
+            let lx = cx as f64 / sf;
+            let ly = cy as f64 / sf;
+            let lw = cw as f64 / sf;
+            let lh = ch as f64 / sf;
+            self.window.set_ime_cursor_area(
+                winit::dpi::LogicalPosition::new(lx, ly),
+                winit::dpi::LogicalSize::new(lw.max(1.0), lh.max(1.0)),
+            );
+        }
+
+        result
+    }
+}
+
+/// SGR mouse button code: Left=0, Middle=1, Right=2, None=3 (release placeholder).
+fn sgr_button_code(btn: Option<winit::event::MouseButton>, _wheel_up: bool, _wheel_down: bool) -> u32 {
+    use winit::event::MouseButton;
+    match btn {
+        Some(MouseButton::Left) => 0,
+        Some(MouseButton::Middle) => 1,
+        Some(MouseButton::Right) => 2,
+        _ => 3,
     }
 }

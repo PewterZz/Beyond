@@ -9,7 +9,22 @@ use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor, Rgb};
 use alacritty_terminal::Term;
-use beyonder_core::TuiCell;
+use beyonder_core::{TuiCell, UnderlineStyle};
+
+/// Mouse-reporting mode bits set by the active TUI (DECSET 1000/1002/1003/1006).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct MouseReport {
+    pub click: bool,
+    pub drag: bool,
+    pub motion: bool,
+    pub sgr: bool,
+}
+
+impl MouseReport {
+    pub fn any(&self) -> bool {
+        self.click || self.drag || self.motion
+    }
+}
 
 struct GridSize {
     cols: usize,
@@ -113,6 +128,22 @@ impl TermGrid {
         self.term.mode().contains(TermMode::ALT_SCREEN)
     }
 
+    /// Mouse-reporting flags the active app has enabled via DECSET 1000/1002/1003/1006.
+    pub fn mouse_report_mode(&self) -> MouseReport {
+        let m = self.term.mode();
+        MouseReport {
+            click: m.contains(TermMode::MOUSE_REPORT_CLICK),
+            drag: m.contains(TermMode::MOUSE_DRAG),
+            motion: m.contains(TermMode::MOUSE_MOTION),
+            sgr: m.contains(TermMode::SGR_MOUSE),
+        }
+    }
+
+    /// True when the app has requested focus in/out reporting (DECSET 1004).
+    pub fn focus_reporting_enabled(&self) -> bool {
+        self.term.mode().contains(TermMode::FOCUS_IN_OUT)
+    }
+
     /// True when app-cursor mode is active (TUI apps often set this).
     /// Affects arrow key escape sequences sent to PTY.
     pub fn app_cursor_mode(&self) -> bool {
@@ -182,14 +213,43 @@ impl TermGrid {
                     Some(resolve_color(effective_bg))
                 };
                 // HIDDEN: character is invisible — render as space.
-                let ch = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
+                let base_ch = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
+                // Assemble the full grapheme cluster: base codepoint plus any
+                // zerowidth combining / ZWJ / variation-selector codepoints
+                // alacritty stored alongside it. This is how ZWJ emoji like
+                // 👨‍👩‍👧 occupy a single cell instead of breaking apart.
+                let mut grapheme = String::new();
+                grapheme.push(base_ch);
+                if let Some(zw) = cell.zerowidth() {
+                    for zc in zw {
+                        grapheme.push(*zc);
+                    }
+                }
 
+                let link = cell.hyperlink().map(|h| std::sync::Arc::new(h.uri().to_string()));
+                let underline = if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
+                    UnderlineStyle::Double
+                } else if cell.flags.contains(Flags::UNDERCURL) {
+                    UnderlineStyle::Curly
+                } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
+                    UnderlineStyle::Dotted
+                } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
+                    UnderlineStyle::Dashed
+                } else if cell.flags.contains(Flags::UNDERLINE) {
+                    UnderlineStyle::Single
+                } else {
+                    UnderlineStyle::None
+                };
+                let strikethrough = cell.flags.contains(Flags::STRIKEOUT);
                 row_cells.push(TuiCell {
-                    ch,
+                    grapheme,
                     fg,
                     bg,
                     bold: cell.flags.contains(Flags::BOLD),
                     italic: cell.flags.contains(Flags::ITALIC),
+                    underline,
+                    strikethrough,
+                    link,
                 });
             }
             result.push(row_cells);

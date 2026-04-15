@@ -35,7 +35,7 @@ Workspace root builds the `beyonder` binary (`src/main.rs`) which is a thin wini
 - **beyonder-runtime** — `AgentSupervisor` spawns and monitors agents; `CapabilityBroker` gates tool use; `tools::` registry executes tool calls; `provider::` holds the `AgentBackend` trait, `OllamaBackend` (NDJSON), and `OpenAICompatBackend` (SSE, used by both llama.cpp and MLX). Runtime is where the async turn-drivers live (one tokio task per agent, driven via `mpsc` command channels).
 - **beyonder-gpu** — wgpu 24 renderer. `Renderer` owns the device/queue/surface and text atlas (glyphon 0.8). `Viewport` handles scrolling. Per-block renderers live in `block_renderers/` (agent_message, approval, shell_block, etc.). The input bar has a **dynamic height**: it grows up to `MAX_INPUT_LINES = 4` visual lines as the user types, then scrolls to keep the cursor visible. `Renderer::compute_bar_state()` recalculates `computed_bar_h` and `input_scroll_px` once per frame; all bar layout uses `computed_bar_h` rather than the constant.
 - **beyonder-ui** — the `App` struct: wires supervisor, store, renderer, input editor, history, mode detector, commands. `App::tick()` (called from `about_to_wait`) drains supervisor/broker events so streaming works even when the window is occluded. `App::handle_window_event` + `App::render` are called from `window_event`.
-- **beyonder-config** — `BeyonderConfig` + `ProviderConfig` enum loaded from TOML.
+- **beyonder-config** — `BeyonderConfig` + `ProviderConfig` enum loaded from TOML. Theme is a named string (`"mocha" | "macchiato" | "frappe" | "latte"`) resolved to a `Theme` palette via `theme_by_name`. Config lives at `~/.config/beyond/config.toml` (honours `$XDG_CONFIG_HOME`) and is **hot-reloaded** via `notify` watching the parent dir — theme changes apply live, provider/model changes apply on next agent spawn, font changes warn "requires restart".
 
 ## Runtime Loop (important)
 
@@ -138,6 +138,35 @@ Also: `rect_h` in `layout_tui` is `(next_row_y - row_y) + 1.0` (gap-to-next-row 
 - `ZDOTDIR`, `BEYONDER_SESSION_ID`
 
 Debug: set `BEYONDER_PTY_LOG=/tmp/pty.log` to dump all raw PTY bytes (escaped) — useful for diagnosing glyph/escape-sequence mismatches without fighting stderr buffering.
+
+## Theming
+
+All renderer colors route through `Renderer::theme` (`beyonder_config::Theme`). Use the `gc(rgb)` helper in `renderer.rs` to convert `[u8;3]` theme slots to `GlyphColor`. Rect colors use the `[f32;4]` slots (`bg`, `surface`, `surface_alt`, `border`) directly. `Renderer::set_theme(theme)` swaps the palette and clears `glyph_buf_cache` so color-baked buffers rebuild. Switch at runtime with `/theme <name>` or by editing the config file. `BUILTIN_THEMES` lists all names. Selection-highlight alpha tints and the model-pill accent are intentionally left as literals.
+
+## Terminal Feature Map
+
+These features are wired end-to-end through `TermGrid` → `TuiCell`/`TerminalCell` → `Renderer`. When adding a new ANSI feature, touch all three layers or the state gets dropped at block finalization.
+
+- **OSC 8 hyperlinks** — `TuiCell.link: Option<Arc<String>>`, `TerminalCell.link: Option<String>` (backward-compat serde default). Read via `cell.hyperlink().uri()` in `cell_grid()`. Underline rendered as theme.blue 1px rect under linked cells in both `layout_tui` (live TUI) and the stored-output `ShellCommand` branch. Hit-testing: `Renderer::link_rects: Vec<([f32;4], String)>` is rebuilt each frame; `App::handle_click` checks it before other hit-tests and calls `open::that(url)`. Hover-cursor-to-pointer is a TODO.
+- **SGR mouse reporting (1000/1002/1003/1006)** — `TermGrid::mouse_report_mode()` reads `TermMode::{MOUSE_REPORT_CLICK, MOUSE_DRAG, MOUSE_MOTION, SGR_MOUSE}`. `Renderer::cell_at_phys()` maps physical pixels → 1-based `(col, row)` inside the padded TUI grid. `App` tracks `mouse_button_down` / `last_mouse_cell` and emits `ESC[<Cb;Cx;Cy(M|m)` sequences to the PTY. Wheel events become `Cb=64/65`; modifier bits add +4/+8/+16. Only SGR (1006) encoding is implemented — legacy 1000/1002 without 1006 is a TODO. Mouse reporting only fires when `renderer.tui_active`.
+- **Focus reporting (DECSET 1004)** — `TermGrid::focus_reporting_enabled()` reads `TermMode::FOCUS_IN_OUT`. `WindowEvent::Focused(bool)` in app.rs writes `ESC[I` / `ESC[O` to the PTY when the flag is set and a TUI is active.
+- **IME / preedit** — `window.set_ime_allowed(true)` in `App::new`. `WindowEvent::Ime` routes `Preedit` to `App::ime_preedit` + `ime_preedit_cursor` (not injected into `InputEditor`); `Commit` inserts text via the normal path. Preedit run syncs to `Renderer::input_preedit` each frame and is drawn inline at the caret in `theme.sky` with a thin underline. `window.set_ime_cursor_area(rect)` is called with the caret rect so IME candidate windows anchor correctly. Caret-x currently approximates via mono `char_w` — real glyphon hit-test is a follow-up.
+- **Underline styles + strikethrough** — `UnderlineStyle` enum (None/Single/Double/Curly/Dotted/Dashed) on both `TuiCell` and `TerminalCell`, plus `strikethrough: bool`. alacritty flags mapped in `cell_grid()`. `draw_underline()` in renderer handles both live TUI and stored-output paths. Curly renders as a 2px solid line (true sine-wave TODO); Dotted/Dashed render as dimmed solid lines (segmented TODO).
+- **Grapheme / ZWJ emoji** — `TuiCell.grapheme: String` (was `ch: char`), `TerminalCell.grapheme: String` with `#[serde(alias="character")]` and a custom untagged deserializer accepting legacy `char` rows. `cell_grid()` assembles `cell.c + cell.zerowidth()` into one cluster. All shaping uses `Shaping::Advanced`; `block_char_geom` still works off the leading codepoint. Wide-char spacer (null) cells extend the adjacent WIDE cell's text run.
+- **Color emoji** — `Renderer::new` loads Apple Color Emoji (`/System/Library/Fonts/Apple Color Emoji.ttc`) and Noto Color Emoji via `font_system.db_mut().load_font_file(...).ok()`. Atlas uses `ColorMode::Web`. Works where glyphon 0.8's swash path supports COLR/sbix; monochrome fallback is acceptable.
+- **Scrollback search** — `Cmd+F` (or `Ctrl+F`) toggles search mode; `/find <pattern>` opens pre-filled. Uses `regex::RegexBuilder::new(...).case_insensitive(true)`. `App::search_match_blocks` + `search_current_match` drive a yellow overlay rect in `layout_blocks` (15% alpha matched, 35% alpha current). `Enter`/`F3` = next, `Shift+Enter`/`Shift+F3` = prev, arrow-up/down also navigate, `Esc` exits. Match-count shown as `find (N/M)` in the input prefix. Sub-string-within-block highlight is a TODO.
+
+## Agent System Prompt
+
+`beyonder-runtime::provider::build_system_prompt(cwd, tools)` is injected as `messages[0]` for **both** the Ollama and OpenAI-compat backends — keep them in sync. The prompt is assembled fresh per agent spawn and embeds:
+
+- **Date/time line** — local time with weekday + offset, plus UTC, plus `$TZ` if set.
+- **OS line** — `os_name` (e.g. `macOS 14.5` via `sw_vers`, or PRETTY_NAME from `/etc/os-release`), family, arch, login shell basename, and **internet reachability** (`OnceLock`-cached TCP-443 probe against 1.1.1.1 / 8.8.8.8 / cloudflare.com with 1.2s timeout).
+- **Toolchain line** — per-tool `available` / `NOT installed` flags for ~30 tools across Core / Network / System / GPU / Security / Web sections, detected via `have()` (which runs `<tool> --version`).
+- **Craft sections** — shell craftsmanship, networking (`ping`/`mtr`/`dig`/`curl -w` timing/`ss`/`lsof`/`tcpdump`/`openssl s_client`), system/observability (`htop`/`btop`/`strace`/`dtrace`/`journalctl`/`log stream`/`launchctl`), GPU (`nvidia-smi` CSV query, `rocm-smi`, `powermetrics`), security/cyber (explicit authorization gate for offensive tools, secret-handling rules), and web fetching (`curl-impersonate` for JA3/JA4 fingerprint bypass of anti-bot walls, headless chromium/playwright/puppeteer, html→text via pandoc/lynx/trafilatura, proxy/Tor syntax).
+- **OS-specific rules block** that swaps between macOS (BSD userland, `brew`, `pbcopy`, `open`, `fswatch`, case-insensitive FS) / Linux (GNU userland, `apt`/`dnf`/`pacman`/`apk`, `xclip`/`wl-copy`, `xdg-open`, `inotifywait`) / Windows (PowerShell + WSL notes). The sed-inplace rule adapts: `sed -i '' 's/…/…/'` on BSD, `sed -i 's/…/…/'` on GNU, with a `gsed` hint on macOS only when that binary is present.
+
+Env probing (`provider/env_probe.rs`) runs once per process via `OnceLock`. When adding new tool-awareness, extend `EnvProbe`, the toolchain line in `build_system_prompt`, and the relevant craft section in one pass so the prompt doesn't claim a tool exists without probing it.
 
 ## Conventions
 

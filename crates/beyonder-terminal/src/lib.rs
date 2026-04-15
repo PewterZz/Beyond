@@ -5,4 +5,4 @@ pub mod term_grid;
 
 pub use pty::PtySession;
 pub use block_builder::{BlockBuilder, BuildEvent};
-pub use term_grid::TermGrid;
+pub use term_grid::{MouseReport, TermGrid};

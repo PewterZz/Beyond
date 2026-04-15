@@ -330,7 +330,10 @@ fn parse_ansi_output(bytes: &[u8], cols: usize, rows: usize) -> TerminalOutput {
     // Trim trailing blank rows.
     let last_content = cells
         .iter()
-        .rposition(|row| row.iter().any(|c| c.ch != ' ' && c.ch != '\0'));
+        .rposition(|row| row.iter().any(|c| {
+            let fc = c.first_char();
+            fc != ' ' && fc != '\0'
+        }));
     let trimmed = match last_content {
         Some(i) => &cells[..=i],
         None => return TerminalOutput { rows: vec![] },
@@ -342,7 +345,7 @@ fn parse_ansi_output(bytes: &[u8], cols: usize, rows: usize) -> TerminalOutput {
             cells: row
                 .iter()
                 .map(|c| TerminalCell {
-                    character: c.ch,
+                    grapheme: c.grapheme.clone(),
                     fg: Some(Color {
                         r: (c.fg[0] * 255.0) as u8,
                         g: (c.fg[1] * 255.0) as u8,
@@ -355,7 +358,9 @@ fn parse_ansi_output(bytes: &[u8], cols: usize, rows: usize) -> TerminalOutput {
                     }),
                     bold: c.bold,
                     italic: c.italic,
-                    underline: false,
+                    underline: c.underline,
+                    strikethrough: c.strikethrough,
+                    link: c.link.as_ref().map(|a| a.as_ref().clone()),
                 })
                 .collect(),
         })

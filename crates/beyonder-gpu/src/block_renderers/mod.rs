@@ -36,7 +36,10 @@ pub fn measure_block_height(block: &Block, width: f32, font_size: f32) -> f32 {
             let last_content = output
                 .rows
                 .iter()
-                .rposition(|row| row.cells.iter().any(|c| c.character != ' ' && c.character != '\0'))
+                .rposition(|row| row.cells.iter().any(|c| {
+                    let fc = c.grapheme.chars().next().unwrap_or('\0');
+                    fc != ' ' && fc != '\0'
+                }))
                 .map(|i| i + 1)
                 .unwrap_or(0);
             if last_content == 0 {

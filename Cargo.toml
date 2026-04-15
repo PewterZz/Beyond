@@ -54,9 +54,11 @@ glyphon = "0.8"
 
 # Config
 toml = "0.8"
+notify = "6"
 
 # Protocol
 bytes = "1"
+regex = "1"
 
 # HTTP client (Ollama provider)
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -65,6 +67,9 @@ futures-util = "0.3"
 # Clipboard
 arboard = "3"
 base64 = "0.22"
+
+# Open URLs in default browser (OSC 8 hyperlink clicks)
+open = "5"
 
 # Internal crates
 beyonder-core = { path = "crates/beyonder-core" }

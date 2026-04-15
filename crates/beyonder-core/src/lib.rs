@@ -10,4 +10,4 @@ pub use agent::*;
 pub use session::*;
 pub use capability::*;
 pub use provenance::*;
-pub use tui::TuiCell;
+pub use tui::{TuiCell, UnderlineStyle};

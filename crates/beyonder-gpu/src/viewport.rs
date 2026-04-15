@@ -47,6 +47,13 @@ impl Viewport {
         self.pinned_to_bottom = true;
     }
 
+    /// Scroll so a content-space y position is visible, aligned near the top.
+    pub fn scroll_to(&mut self, y: f32) {
+        let max_scroll = (self.total_content_height - self.height).max(0.0);
+        self.scroll_offset = y.clamp(0.0, max_scroll);
+        self.pinned_to_bottom = (max_scroll - self.scroll_offset) < 1.0;
+    }
+
     pub fn resize(&mut self, width: f32, height: f32) {
         self.width = width;
         self.height = height;

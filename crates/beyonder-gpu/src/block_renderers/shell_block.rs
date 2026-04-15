@@ -27,7 +27,10 @@ pub fn render_shell_block(
     let last_content = output
         .rows
         .iter()
-        .rposition(|row| row.cells.iter().any(|c| c.character != ' ' && c.character != '\0'))
+        .rposition(|row| row.cells.iter().any(|c| {
+            let fc = c.grapheme.chars().next().unwrap_or('\0');
+            fc != ' ' && fc != '\0'
+        }))
         .map(|i| i + 1)
         .unwrap_or(0);
     let has_output = last_content > 0;

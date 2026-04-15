@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use tracing::debug;
-use beyonder_core::{AgentId, Block, BlockContent, BlockKind, BlockStatus, TuiCell};
+use beyonder_core::{AgentId, Block, BlockContent, BlockKind, BlockStatus, TuiCell, UnderlineStyle};
 use glyphon::{
     Attrs, Buffer as GlyphBuffer, Cache, Color as GlyphColor, ColorMode, Family, FontSystem,
     Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds,
@@ -34,6 +34,9 @@ const TUI_PAD: f32 = 8.0;
 /// Vertical gap between blocks.
 const GAP: f32 = 2.0;
 
+#[inline]
+fn gc(rgb: [u8; 3]) -> GlyphColor { GlyphColor::rgb(rgb[0], rgb[1], rgb[2]) }
+
 pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -52,6 +55,8 @@ pub struct Renderer {
     pub viewport: Viewport,
     /// Logical font size in points/px. Multiply by scale_factor for physical pixels.
     pub font_size: f32,
+    /// Active color palette. All drawing functions consult this; swap with `set_theme`.
+    pub theme: beyonder_config::Theme,
     /// HiDPI scale factor — 2.0 on Retina, 1.0 on standard displays.
     pub scale_factor: f32,
     /// Measured cell dimensions (cell_w, cell_h) derived from actual font metrics.
@@ -69,6 +74,12 @@ pub struct Renderer {
     pub input_cursor: usize,
     pub input_all_selected: bool,
     pub input_mode_prefix: String,
+    /// Active IME preedit string (displayed at the caret in `self.theme.sky`
+    /// with an underline until the input method commits). Synced from App.
+    pub input_preedit: String,
+    /// Last known caret rect [x, y, w, h] in physical pixels — used by the host
+    /// App to position the IME candidate window via `set_ime_cursor_area`.
+    pub input_caret_rect: [f32; 4],
 
     /// Cached dynamic bar height in physical pixels — updated once per frame.
     computed_bar_h: f32,
@@ -106,6 +117,8 @@ pub struct Renderer {
     pub open_dropdown: Option<(usize, Vec<String>, Option<usize>)>,
     /// Bounding rects [x, y, w, h] for each pill (written during layout).
     pub pill_rects: Vec<[f32; 4]>,
+    /// OSC 8 hyperlink hit rects: ([x,y,w,h], url). Rebuilt each frame.
+    pub link_rects: Vec<([f32; 4], String)>,
     /// Bounding rects [x, y, w, h] per dropdown item (written during layout).
     pub dropdown_item_rects: Vec<[f32; 4]>,
 
@@ -142,6 +155,11 @@ pub struct Renderer {
     pub active_tab: usize,
     /// Hit rects [x, y, w, h] per tab, written during tab-strip layout.
     pub tab_rects: Vec<[f32; 4]>,
+
+    /// Indices of blocks that contain a search match — painted with a translucent yellow overlay.
+    pub search_match_blocks: Vec<usize>,
+    /// Index (within `search_match_blocks`) of the currently focused match — painted more opaque.
+    pub search_current_match: Option<usize>,
 }
 
 /// Accumulates GlyphBuffer entries for a frame. Parallel `keys` vec records
@@ -255,6 +273,12 @@ impl Renderer {
 
         // Glyphon 0.8 setup
         let mut font_system = FontSystem::new();
+        {
+            let db = font_system.db_mut();
+            db.load_font_file("/System/Library/Fonts/Apple Color Emoji.ttc").ok();
+            db.load_font_file("/Library/Fonts/Apple Color Emoji.ttc").ok();
+            db.load_font_file("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf").ok();
+        }
         let swash_cache = SwashCache::new();
         let glyph_cache = Cache::new(&device);
         let mut glyph_viewport = GlyphViewport::new(&device, &glyph_cache);
@@ -299,6 +323,7 @@ impl Renderer {
             text_renderer,
             viewport,
             font_size,
+            theme: beyonder_config::Theme::default(),
             scale_factor,
             measured_cell_size,
             measured_metrics_line_h,
@@ -307,6 +332,8 @@ impl Renderer {
             input_cursor: 0,
             input_all_selected: false,
             input_mode_prefix: "> ".to_string(),
+            input_preedit: String::new(),
+            input_caret_rect: [0.0; 4],
             computed_bar_h: INPUT_BAR_HEIGHT * scale_factor,
             input_scroll_px: 0.0,
 
@@ -325,6 +352,7 @@ impl Renderer {
             context_pills: vec![],
             open_dropdown: None,
             pill_rects: vec![],
+            link_rects: vec![],
             dropdown_item_rects: vec![],
             command_palette: None,
             cmd_palette_hovered: None,
@@ -338,6 +366,8 @@ impl Renderer {
             tab_labels: vec![],
             active_tab: 0,
             tab_rects: vec![],
+            search_match_blocks: vec![],
+            search_current_match: None,
         })
     }
 
@@ -593,7 +623,7 @@ impl Renderer {
             prefix_len + cursor + "▌".len()
         };
 
-        let col = GlyphColor::rgb(205, 214, 244);
+        let col = gc(self.theme.text);
         let buf = self.make_buffer(&text, text_w, phys_font, col);
 
         let mut total_lines = 0usize;
@@ -646,6 +676,31 @@ impl Renderer {
                 "input bar state"
             );
         }
+    }
+
+    /// Convert physical-pixel coords inside the TUI grid into 1-based (col, row)
+    /// for SGR mouse reporting. Returns None if the point is outside the grid.
+    pub fn cell_at_phys(&self, px: f32, py: f32) -> Option<(u32, u32)> {
+        if !self.tui_active {
+            return None;
+        }
+        let (cell_w, cell_h) = self.terminal_cell_size();
+        if cell_w <= 0.0 || cell_h <= 0.0 {
+            return None;
+        }
+        let pad = TUI_PAD * self.scale_factor;
+        let lx = px - pad;
+        let ly = py - pad;
+        if lx < 0.0 || ly < 0.0 {
+            return None;
+        }
+        let (cols, rows) = self.tui_grid_size();
+        let c = (lx / cell_w).floor() as i32;
+        let r = (ly / cell_h).floor() as i32;
+        if c < 0 || r < 0 || c >= cols as i32 || r >= rows as i32 {
+            return None;
+        }
+        Some((c as u32 + 1, r as u32 + 1))
     }
 
     /// Terminal grid dimensions for TUI fullscreen mode (bar hidden — full window).
@@ -829,11 +884,10 @@ impl Renderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            // Catppuccin Mocha — Base #1e1e2e
-                            r: 0.118,
-                            g: 0.118,
-                            b: 0.180,
-                            a: 1.0,
+                            r: self.theme.bg[0] as f64,
+                            g: self.theme.bg[1] as f64,
+                            b: self.theme.bg[2] as f64,
+                            a: self.theme.bg[3] as f64,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -868,7 +922,10 @@ impl Renderer {
     fn live_block_height(&self, phys_font: f32) -> f32 {
         let last_content = self.tui_cells
             .iter()
-            .rposition(|row| row.iter().any(|c| c.ch != ' ' && c.ch != '\0'))
+            .rposition(|row| row.iter().any(|c| {
+                let fc = c.first_char();
+                fc != ' ' && fc != '\0'
+            }))
             .map(|i| i + 1)
             .unwrap_or(1);
         let (_, cell_h) = self.terminal_cell_size();
@@ -887,6 +944,12 @@ impl Renderer {
         }
     }
 
+    /// Swap the active theme; invalidates color-baked glyph caches.
+    pub fn set_theme(&mut self, theme: beyonder_config::Theme) {
+        self.theme = theme;
+        self.glyph_buf_cache.clear();
+    }
+
     /// Toggle a tool block open/closed.
     pub fn toggle_collapsed(&mut self, block_id: &beyonder_core::BlockId) {
         if self.user_expanded.contains(block_id) {
@@ -894,6 +957,23 @@ impl Renderer {
         } else {
             self.user_expanded.insert(block_id.clone());
         }
+    }
+
+    /// Content-space Y (top) of block index `idx`, matching layout_blocks's cursor.
+    /// Returns None if idx out of range.
+    pub fn block_top_y(&self, idx: usize) -> Option<f32> {
+        if idx >= self.blocks.len() { return None; }
+        let sc = self.scale_factor;
+        let padding = PADDING * sc;
+        let gap = GAP * sc;
+        let phys_font = self.font_size * sc;
+        let content_w = self.viewport.width - padding * 2.0;
+        let mut y = padding;
+        for (i, b) in self.blocks.iter().enumerate() {
+            if i == idx { return Some(y); }
+            y += self.block_height(i, b, content_w, phys_font) + gap;
+        }
+        None
     }
 
     /// for the currently running block.
@@ -907,7 +987,9 @@ impl Renderer {
         }
     }
 
-    fn layout_blocks(&self) -> (Vec<RectInstance>, f32) {
+    fn layout_blocks(&mut self) -> (Vec<RectInstance>, f32) {
+        self.link_rects.clear();
+        let mut link_rects_local: Vec<([f32; 4], String)> = vec![];
         let mut rects = vec![];
         let sc = self.scale_factor;
         let padding = PADDING * sc;
@@ -936,6 +1018,13 @@ impl Renderer {
                         render_block_background(block, x, sy, content_w, h, &mut rects);
                     }
                 }
+                if let Some(match_pos) = self.search_match_blocks.iter().position(|&mi| mi == i) {
+                    let y_rgb = self.theme.yellow;
+                    let is_current = self.search_current_match == Some(match_pos);
+                    let alpha = if is_current { 0.35 } else { 0.15 };
+                    let col = [y_rgb[0] as f32 / 255.0, y_rgb[1] as f32 / 255.0, y_rgb[2] as f32 / 255.0, alpha];
+                    rects.push(RectInstance::filled(x, sy, content_w, h, col));
+                }
                 // Cell background rects — live (TermGrid) and completed (stored output).
                 let cmd_bar_h = phys_font * 2.8;
                 let inner_gap = phys_font * 0.4;
@@ -962,14 +1051,35 @@ impl Renderer {
                     let cy = (content_y + cur_row as f32 * cell_h).floor();
                     rects.push(RectInstance::filled(cx, cy, rect_w, rect_h, [0.804, 0.835, 0.918, 0.55]));
                 } else if let BlockContent::ShellCommand { output, .. } = &block.content {
+                    let bl = self.theme.blue;
+                    let link_col = [bl[0] as f32 / 255.0, bl[1] as f32 / 255.0, bl[2] as f32 / 255.0, 1.0];
+                    let ul_h = (1.0 * sc).max(1.0);
                     for (row_idx, row) in output.rows.iter().enumerate() {
                         let ry = (content_y + row_idx as f32 * cell_h).floor();
                         if ry > sy + h { break; }
                         for (col_idx, cell) in row.cells.iter().enumerate() {
+                            let rx = (content_x + col_idx as f32 * cell_w).floor();
                             if let Some(bg) = cell.bg {
-                                let rx = (content_x + col_idx as f32 * cell_w).floor();
                                 rects.push(RectInstance::filled(rx, ry, rect_w, rect_h,
                                     [bg.r as f32 / 255.0, bg.g as f32 / 255.0, bg.b as f32 / 255.0, 1.0]));
+                            }
+                            if let Some(url) = &cell.link {
+                                let ul_y = ry + rect_h - ul_h;
+                                rects.push(RectInstance::filled(rx, ul_y, rect_w, ul_h, link_col));
+                                link_rects_local.push(([rx, ry, rect_w, rect_h], url.clone()));
+                            }
+                            if cell.underline != UnderlineStyle::None || cell.strikethrough {
+                                let fg_rgb = cell.fg.map(|c| [c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0])
+                                    .unwrap_or(self.theme.text.map(|v| v as f32 / 255.0));
+                                let line_col = [fg_rgb[0], fg_rgb[1], fg_rgb[2], 1.0];
+                                let dim_col = [fg_rgb[0], fg_rgb[1], fg_rgb[2], 0.5];
+                                let dash_col = [fg_rgb[0], fg_rgb[1], fg_rgb[2], 0.75];
+                                let px = sc.max(1.0);
+                                draw_underline(&mut rects, rx, ry, rect_w, rect_h, px, cell.underline, line_col, dim_col, dash_col);
+                                if cell.strikethrough {
+                                    let s_y = (ry + rect_h * 0.5).floor();
+                                    rects.push(RectInstance::filled(rx, s_y, rect_w, px, line_col));
+                                }
                             }
                         }
                     }
@@ -998,6 +1108,7 @@ impl Renderer {
             y += h + gap;
         }
 
+        self.link_rects.extend(link_rects_local);
         (rects, y)
     }
 
@@ -1018,10 +1129,11 @@ impl Renderer {
         let bar_bg = if self.input_running {
             [0.065, 0.065, 0.100, 1.0_f32]
         } else {
-            [0.094, 0.094, 0.145, 1.0]
+            self.theme.surface_alt
         };
         rects.push(RectInstance::filled(0.0, bar_y, win_w, bar_h, bar_bg));
-        rects.push(RectInstance::filled(0.0, bar_y, win_w, sc.ceil(), [0.271, 0.278, 0.353, 0.5]));
+        let b = self.theme.border;
+        rects.push(RectInstance::filled(0.0, bar_y, win_w, sc.ceil(), [b[0], b[1], b[2], 0.5]));
 
         // Context pills.
         let pill_hpad = 12.0 * sc;
@@ -1110,7 +1222,7 @@ impl Renderer {
                 let dd_border = pill_borders.get(pill_idx).copied()
                     .unwrap_or([0.345, 0.357, 0.439, 0.7]);
                 rects.push(
-                    RectInstance::filled(px, dd_y_start, dd_w, dd_h_total, [0.118, 0.118, 0.180, 1.0])
+                    RectInstance::filled(px, dd_y_start, dd_w, dd_h_total, self.theme.bg)
                         .with_radius(4.0)
                         .with_border(1.0, dd_border),
                 );
@@ -1118,9 +1230,9 @@ impl Renderer {
                     let iy = dd_y_start + i as f32 * item_h;
                     let is_hovered = hovered.map(|h| h == i).unwrap_or(false);
                     let item_bg = if is_hovered {
-                        pill_bgs.get(pill_idx).copied().unwrap_or([0.192, 0.196, 0.267, 1.0])
+                        pill_bgs.get(pill_idx).copied().unwrap_or(self.theme.surface)
                     } else {
-                        [0.118, 0.118, 0.180, 0.0]
+                        [self.theme.bg[0], self.theme.bg[1], self.theme.bg[2], 0.0]
                     };
                     rects.push(RectInstance::filled(px, iy, dd_w, item_h, item_bg));
                     new_dropdown_rects.push([px, iy, dd_w, item_h]);
@@ -1139,28 +1251,48 @@ impl Renderer {
                 let n = cmds.len().min(8);
                 let pal_h = n as f32 * item_h;
                 let pal_y = bar_y - pal_h - 4.0 * sc;
+                let border_col = [self.theme.border[0], self.theme.border[1], self.theme.border[2], 0.8];
                 rects.push(
-                    RectInstance::filled(pal_x, pal_y, pal_w, pal_h, [0.094, 0.094, 0.145, 1.0])
+                    RectInstance::filled(pal_x, pal_y, pal_w, pal_h, self.theme.surface_alt)
                         .with_radius(6.0)
-                        .with_border(1.0, [0.271, 0.278, 0.353, 0.8]),
+                        .with_border(1.0, border_col),
                 );
                 for i in 0..n {
                     let iy = pal_y + i as f32 * item_h;
                     if self.cmd_palette_hovered == Some(i) {
-                        rects.push(RectInstance::filled(pal_x, iy, pal_w, item_h, [0.192, 0.196, 0.267, 1.0]));
+                        rects.push(RectInstance::filled(pal_x, iy, pal_w, item_h, self.theme.surface));
                     }
                     new_palette_rects.push([pal_x, iy, pal_w, item_h]);
                 }
             }
         }
         self.cmd_palette_rects = new_palette_rects;
+
+        // IME preedit underline: a thin sky-colored bar under the composing
+        // run. The composed text itself is painted inline with the input
+        // (see build_bar_text_buffers) in theme.sky; this underline is the
+        // subtle "in-composition" hint.
+        if !self.input_preedit.is_empty() && !self.input_running && !self.input_all_selected {
+            let char_w = (phys_font * 0.6).round();
+            let pre_chars = self.input_preedit.chars().count();
+            let pre_w = pre_chars as f32 * char_w;
+            let ul_h = (1.0 * sc).max(1.0);
+            let [cx, cy, _cw, ch] = self.input_caret_rect;
+            if ch > 0.0 {
+                let ul_y = cy + ch - ul_h;
+                let sky = self.theme.sky;
+                let ul_col = [sky[0] as f32 / 255.0, sky[1] as f32 / 255.0, sky[2] as f32 / 255.0, 1.0];
+                rects.push(RectInstance::filled(cx, ul_y, pre_w.max(ul_h), ul_h, ul_col));
+            }
+        }
     }
 
     fn tui_cell_size(&self) -> (f32, f32) {
         self.terminal_cell_size()
     }
 
-    fn layout_tui(&self, rects: &mut Vec<RectInstance>) {
+    fn layout_tui(&mut self, rects: &mut Vec<RectInstance>) {
+        self.link_rects.clear();
         let (cell_w, cell_h) = self.tui_cell_size();
         let pad = TUI_PAD * self.scale_factor;
         // Bar is hidden in TUI mode — fill the full window (minus pad).
@@ -1185,7 +1317,30 @@ impl Renderer {
                 // 2) Block / quadrant / shade / circle chars: paint fg as
                 // geometric sub-rects so pixel-art (claude avatar, progress
                 // bars, indicators) renders sharply regardless of glyph.
-                if let Some(geom) = block_char_geom(cell.ch) {
+                // OSC 8 hyperlink: thin underline in theme blue beneath the cell.
+                // TODO: hover state + click-to-open are follow-up work.
+                if let Some(url) = &cell.link {
+                    let ul_h = (1.0 * self.scale_factor).max(1.0);
+                    let ul_y = row_y + rect_h - ul_h;
+                    let bl = self.theme.blue;
+                    let col = [bl[0] as f32 / 255.0, bl[1] as f32 / 255.0, bl[2] as f32 / 255.0, 1.0];
+                    rects.push(RectInstance::filled(col_x, ul_y, rect_w, ul_h, col));
+                    self.link_rects.push(([col_x, row_y, rect_w, rect_h], url.as_ref().clone()));
+                }
+                // Underline / strikethrough decorations. Use cell.fg as the
+                // line color — these are ANSI SGR attributes the app set.
+                if cell.underline != UnderlineStyle::None || cell.strikethrough {
+                    let line_col = [cell.fg[0], cell.fg[1], cell.fg[2], 1.0];
+                    let dim_col = [cell.fg[0], cell.fg[1], cell.fg[2], 0.5];
+                    let dash_col = [cell.fg[0], cell.fg[1], cell.fg[2], 0.75];
+                    let px = (self.scale_factor).max(1.0);
+                    draw_underline(rects, col_x, row_y, rect_w, rect_h, px, cell.underline, line_col, dim_col, dash_col);
+                    if cell.strikethrough {
+                        let s_y = (row_y + rect_h * 0.5).floor();
+                        rects.push(RectInstance::filled(col_x, s_y, rect_w, px, line_col));
+                    }
+                }
+                if let Some(geom) = block_char_geom(cell.first_char()) {
                     let fg = cell.fg;
                     let col = [fg[0], fg[1], fg[2], 1.0];
                     for sub in geom {
@@ -1330,13 +1485,13 @@ impl Renderer {
                         Some(d) => format!("{}  {}", dir_display, d),
                         None => dir_display,
                     };
-                    let meta_color = GlyphColor::rgb(166, 173, 200); // between Overlay2 and Subtext1
+                    let meta_color = gc(self.theme.subtext);
                     let meta_buf = self.make_buffer(&meta_text, content_w - hdr_pad * 2.0, meta_font, meta_color);
                     results.push((meta_buf, x + hdr_pad, meta_y, content_w - hdr_pad * 2.0, meta_line_h, meta_color));
 
                     // Command row (normal font): the shell command itself.
                     let cmd_text_y = meta_y + meta_line_h + 3.0 * sc;
-                    let cmd_color = GlyphColor::rgb(205, 214, 244); // Text
+                    let cmd_color = gc(self.theme.text);
                     let cmd_buf = self.make_buffer(input, content_w - hdr_pad * 2.0, phys_font, cmd_color);
                     results.push((cmd_buf, x + hdr_pad, cmd_text_y, content_w - hdr_pad * 2.0, phys_font * 1.4, cmd_color));
                 } else if !is_agent && !is_plain_text {
@@ -1352,10 +1507,10 @@ impl Renderer {
                         raw_label
                     };
                     let header_color = match block.kind {
-                        BlockKind::Agent    => GlyphColor::rgb(137, 180, 250),
-                        BlockKind::Approval => GlyphColor::rgb(249, 226, 175),
-                        BlockKind::Tool     => GlyphColor::rgb(148, 226, 213),
-                        _                   => GlyphColor::rgb(186, 194, 222),
+                        BlockKind::Agent    => gc(self.theme.blue),
+                        BlockKind::Approval => gc(self.theme.yellow),
+                        BlockKind::Tool     => gc(self.theme.teal),
+                        _                   => gc(self.theme.subtext),
                     };
                     let header_buf = self.make_buffer(
                         &header_label,
@@ -1394,15 +1549,21 @@ impl Renderer {
                             for (row_idx, row) in output.rows.iter().enumerate() {
                                 let row_y = (base_y + row_idx as f32 * cell_h).floor();
                                 if row_y > sy + h { break; }
-                                let any_visible = row.cells.iter().any(|c| c.character != ' ' && c.character != '\0');
+                                let any_visible = row.cells.iter().any(|c| {
+                                    let fc = c.grapheme.chars().next().unwrap_or('\0');
+                                    fc != ' ' && fc != '\0'
+                                });
                                 if !any_visible { continue; }
                                 let tui_row: Vec<TuiCell> = row.cells.iter().map(|c| TuiCell {
-                                    ch: c.character,
+                                    grapheme: c.grapheme.clone(),
                                     fg: c.fg.map(|col| [col.r as f32 / 255.0, col.g as f32 / 255.0, col.b as f32 / 255.0])
                                            .unwrap_or([0.804, 0.835, 0.918]),
                                     bg: c.bg.map(|col| [col.r as f32 / 255.0, col.g as f32 / 255.0, col.b as f32 / 255.0]),
                                     bold: c.bold,
                                     italic: c.italic,
+                                    underline: c.underline,
+                                    strikethrough: c.strikethrough,
+                                    link: None,
                                 }).collect();
                                 let runs = self.make_tui_row_runs(&tui_row, cell_w, phys_font);
                                 for (buf, rx, w, color) in runs {
@@ -1424,7 +1585,7 @@ impl Renderer {
                                 .and_then(|id| self.agent_running_tool.get(id))
                                 .cloned();
                             const FRAMES: [&str; 10] = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
-                            let spin_color = GlyphColor::rgb(137, 180, 250); // Catppuccin Blue
+                            let spin_color = gc(self.theme.blue);
                             if is_running_agent && content_text.is_empty() {
                                 // No text yet — centred spinner (or "tool_name..." label).
                                 let frame = FRAMES[self.spinner_frame as usize];
@@ -1455,7 +1616,7 @@ impl Renderer {
                             if !content_text.is_empty() {
                                 let is_user_msg = matches!(&block.content,
                                     BlockContent::AgentMessage { role: beyonder_core::MessageRole::User, .. });
-                                let fallback_color = GlyphColor::rgb(205, 214, 244);
+                                let fallback_color = gc(self.theme.text);
                                 // Cache key: (content_len, buf_w bits, phys_font bits, viewport_h bits).
                                 let content_len = content_text.len() as u64;
                                 let bw_bits = buf_w.to_bits();
@@ -1490,13 +1651,13 @@ impl Renderer {
                                     );
                                 } else {
                                     let content_buf = if is_user_msg {
-                                        let col = GlyphColor::rgb(166, 173, 200); // dimmer — user echo
+                                        let col = gc(self.theme.subtext);
                                         self.make_buffer(&content_text, buf_w, phys_font, col)
                                     } else {
                                         let text_color = match block.kind {
-                                            BlockKind::Approval => GlyphColor::rgb(250, 179, 135),
-                                            BlockKind::Tool     => GlyphColor::rgb(137, 220, 235),
-                                            _                   => GlyphColor::rgb(205, 214, 244),
+                                            BlockKind::Approval => gc(self.theme.peach),
+                                            BlockKind::Tool     => gc(self.theme.sky),
+                                            _                   => gc(self.theme.text),
                                         };
                                         self.make_buffer(&content_text, buf_w, phys_font, text_color)
                                     };
@@ -1549,17 +1710,17 @@ impl Renderer {
 
         if self.input_running {
             let text = "running…".to_string();
-            let col = GlyphColor::rgb(108, 112, 134);
+            let col = gc(self.theme.muted);
             let buf = self.make_buffer(&text, text_w, phys_font, col);
             results.push((buf, text_x, text_y, text_w, line_h, col));
         } else if self.input_text.is_empty() {
             let caret = if self.cursor_blink_on { "▌" } else { " " };
-            let caret_col = GlyphColor::rgb(205, 214, 244);
+            let caret_col = gc(self.theme.text);
             let caret_w = (phys_font * 0.6).round();
             let caret_buf = self.make_buffer(caret, caret_w * 2.0, phys_font, caret_col);
             results.push((caret_buf, text_x, text_y, caret_w * 2.0, line_h, caret_col));
             let ph = "Type anything, beyonder will pick up whether it's a command or prompt";
-            let ph_col = GlyphColor::rgb(108, 112, 134);
+            let ph_col = gc(self.theme.muted);
             let ph_x = text_x + caret_w;
             let ph_w = (text_w - caret_w).max(1.0);
             let ph_buf = self.make_buffer(ph, ph_w, phys_font, ph_col);
@@ -1568,15 +1729,27 @@ impl Renderer {
             let cursor = self.input_cursor.min(self.input_text.len());
             let before = &self.input_text[..cursor];
             let after = &self.input_text[cursor..];
+            let preedit_active = !self.input_preedit.is_empty();
             let (text, col) = if self.input_all_selected {
                 // Render the whole line in accent colour with a block cursor to
                 // signal "all selected — next keystroke replaces everything".
                 let t = format!("{}█{}", self.input_mode_prefix, self.input_text);
-                (t, GlyphColor::rgb(137, 180, 250)) // Catppuccin Blue
+                (t, gc(self.theme.blue))
+            } else if preedit_active {
+                // Splice the IME preedit string in at the caret. Fallback path:
+                // the whole composed line is shown in `theme.sky` so the user
+                // can tell a composition is active; when commit fires the
+                // preedit clears and the committed text is inserted for real.
+                let caret = if self.cursor_blink_on { "▌" } else { " " };
+                let t = format!(
+                    "{}{}{}{}{}",
+                    self.input_mode_prefix, before, self.input_preedit, caret, after
+                );
+                (t, gc(self.theme.sky))
             } else {
                 let caret = if self.cursor_blink_on { "▌" } else { " " };
                 let t = format!("{}{}{}{}", self.input_mode_prefix, before, caret, after);
-                (t, GlyphColor::rgb(205, 214, 244))
+                (t, gc(self.theme.text))
             };
 
             let phys_font_local = self.font_size * sc;
@@ -1626,6 +1799,15 @@ impl Renderer {
                 "bar text layout"
             );
             results.push_clipped((buf, text_x, text_block_y, text_w, text_area_h, col), (clip_top, clip_bottom));
+
+            // Approximate caret rect (for IME candidate positioning). Uses the
+            // monospace char_w since the input font is JetBrains Mono Nerd Font.
+            let char_w = (phys_font * 0.6).round();
+            let prefix_chars = self.input_mode_prefix.chars().count();
+            let before_chars = self.input_text[..cursor].chars().count();
+            let caret_x = text_x + (prefix_chars as f32 + before_chars as f32) * char_w;
+            self.input_caret_rect = [caret_x, text_block_y, char_w.max(2.0), line_h_local];
+            let _ = preedit_active;
         }
 
         // Pill text — one entry per pill.
@@ -1639,9 +1821,9 @@ impl Renderer {
         let pill_text_y = pill_top + (pill_h - pill_line_h) * 0.5;
         let pill_icons = ['\u{e73c}', '\u{e718}', '\u{f07c}'];
         let pill_text_colors = [
-            GlyphColor::rgb(249, 226, 175),
-            GlyphColor::rgb(166, 227, 161),
-            GlyphColor::rgb(180, 190, 254),
+            gc(self.theme.yellow),
+            gc(self.theme.green),
+            gc(self.theme.lavender),
         ];
         let pills = self.context_pills.clone();
         let mut pill_x = 14.0 * sc;
@@ -1650,7 +1832,7 @@ impl Renderer {
             let full_label = format!("{} {}", icon, label);
             let pill_w = full_label.chars().count() as f32 * pill_char_w + 2.0 * pill_hpad;
             let color = pill_text_colors.get(i).copied()
-                .unwrap_or(GlyphColor::rgb(186, 194, 222));
+                .unwrap_or(gc(self.theme.subtext));
             let pill_buf = self.make_pill_buffer(&full_label, pill_w - 2.0 * pill_hpad, pill_font_size, color);
             results.push((pill_buf, pill_x + pill_hpad, pill_text_y, pill_w - 2.0 * pill_hpad, pill_line_h, color));
             pill_x += pill_w + pill_gap;
@@ -1668,7 +1850,7 @@ impl Renderer {
             let pill_h = 22.0 * sc;
             let model_line_h = model_font * 1.4;
             let model_ty = pill_top + (pill_h - model_line_h) * 0.5;
-            let model_color = GlyphColor::rgb(203, 143, 247);
+            let model_color = gc(self.theme.mauve);
             let model_buf = self.make_pill_buffer(&model_label, model_w - 2.0 * pill_hpad, model_font, model_color);
             results.push((model_buf, model_x + pill_hpad, model_ty, model_w - 2.0 * pill_hpad, model_line_h, model_color));
         }
@@ -1681,9 +1863,9 @@ impl Renderer {
                 let mode_font = phys_font * 0.75;
                 let mode_line_h = mode_font * 1.4;
                 let mode_color = match self.mode_label.as_str() {
-                    "shell" => GlyphColor::rgb(137, 180, 250),
-                    "agent" => GlyphColor::rgb(203, 166, 247),
-                    _       => GlyphColor::rgb(147, 153, 178),
+                    "shell" => gc(self.theme.blue),
+                    "agent" => gc(self.theme.mauve),
+                    _       => gc(self.theme.muted),
                 };
                 let hpad = 12.0 * sc;
                 let mode_buf = self.make_pill_buffer(&mode_text, mode_w - 2.0 * hpad, mode_font, mode_color);
@@ -1701,12 +1883,12 @@ impl Renderer {
                 let n = items.len();
                 let dd_y_start = bar_y - n as f32 * item_h;
                 let dd_text_colors = [
-                    GlyphColor::rgb(249, 226, 175),
-                    GlyphColor::rgb(166, 227, 161),
-                    GlyphColor::rgb(180, 190, 254),
+                    gc(self.theme.yellow),
+                    gc(self.theme.green),
+                    gc(self.theme.lavender),
                 ];
                 let dd_text_color = dd_text_colors.get(pill_idx).copied()
-                    .unwrap_or(GlyphColor::rgb(205, 214, 244));
+                    .unwrap_or(gc(self.theme.text));
                 for (i, item) in items.iter().enumerate() {
                     let iy = dd_y_start + i as f32 * item_h + item_v_pad;
                     let item_buf = self.make_buffer(item, dd_w - pill_hpad * 2.0, phys_font, dd_text_color);
@@ -1723,8 +1905,8 @@ impl Renderer {
                 let pal_w = (win_w * 0.6).min(600.0 * sc).max(300.0 * sc);
                 let pal_x = 14.0 * sc;
                 let pal_y = bar_y - n as f32 * item_h - 4.0 * sc;
-                let usage_col = GlyphColor::rgb(180, 190, 254);
-                let desc_col  = GlyphColor::rgb(108, 112, 134);
+                let usage_col = gc(self.theme.lavender);
+                let desc_col  = gc(self.theme.muted);
                 let pal_font  = phys_font * 0.88;
                 let pal_line_h = pal_font * 1.4;
                 let v_pad = (item_h - pal_line_h) * 0.5;
@@ -1756,9 +1938,10 @@ impl Renderer {
         let sc = self.scale_factor;
         let win_w = self.surface_config.width as f32;
         // Strip background (Catppuccin Mantle).
-        rects.push(RectInstance::filled(0.0, 0.0, win_w, tab_h, [0.094, 0.094, 0.145, 1.0]));
+        rects.push(RectInstance::filled(0.0, 0.0, win_w, tab_h, self.theme.surface_alt));
         // Bottom separator.
-        rects.push(RectInstance::filled(0.0, tab_h - sc.ceil(), win_w, sc.ceil(), [0.271, 0.278, 0.353, 0.6]));
+        let b = self.theme.border;
+        rects.push(RectInstance::filled(0.0, tab_h - sc.ceil(), win_w, sc.ceil(), [b[0], b[1], b[2], 0.6]));
 
         let pad_x = 8.0 * sc;
         let gap = 4.0 * sc;
@@ -1775,10 +1958,12 @@ impl Renderer {
         for (i, label) in labels.iter().enumerate() {
             let tab_w = label.chars().count() as f32 * char_w + inner_pad * 2.0;
             let is_active = i == active;
+            let b = self.theme.border;
+            let bl = self.theme.blue;
             let (bg, border) = if is_active {
-                ([0.192, 0.196, 0.267, 1.0_f32], [0.537, 0.706, 0.980, 0.9_f32])
+                (self.theme.surface, [bl[0] as f32/255.0, bl[1] as f32/255.0, bl[2] as f32/255.0, 0.9_f32])
             } else {
-                ([0.125, 0.125, 0.180, 1.0_f32], [0.271, 0.278, 0.353, 0.5_f32])
+                (self.theme.bg, [b[0], b[1], b[2], 0.5_f32])
             };
             rects.push(
                 RectInstance::filled(x, tab_y, tab_w, tab_inner_h, bg)
@@ -1807,9 +1992,9 @@ impl Renderer {
         for (i, label) in labels.iter().enumerate() {
             let Some(&[rx, ry, rw, rh]) = rects.get(i) else { continue };
             let color = if i == active {
-                GlyphColor::rgb(205, 214, 244)
+                gc(self.theme.text)
             } else {
-                GlyphColor::rgb(147, 153, 178)
+                gc(self.theme.muted)
             };
             let ty = ry + (rh - line_h) * 0.5;
             let buf = self.make_pill_buffer(label, (rw - inner_pad * 2.0).max(1.0), phys_font, color);
@@ -1880,11 +2065,11 @@ impl Renderer {
         };
         let text = visible_text.as_ref();
 
-        let base_color   = GlyphColor::rgb(205, 214, 244); // Text
-        let heading_color= GlyphColor::rgb(180, 190, 254); // Lavender
-        let code_color   = GlyphColor::rgb(137, 220, 235); // Teal
-        let bold_color   = GlyphColor::rgb(255, 255, 255); // bright white
-        let fence_color  = GlyphColor::rgb(166, 227, 161); // green
+        let base_color   = gc(self.theme.text);
+        let heading_color= gc(self.theme.lavender);
+        let code_color   = gc(self.theme.sky);
+        let bold_color   = GlyphColor::rgb(255, 255, 255);
+        let fence_color  = gc(self.theme.green);
 
         let metrics = Metrics::new(size, size * 1.4);
         let mut buf = GlyphBuffer::new(&mut self.font_system, metrics);
@@ -1995,26 +2180,38 @@ impl Renderer {
             // Skip null chars — these are wide-char spacer cells that alacritty writes
             // in the column adjacent to a 2-cell-wide character. Including them as spaces
             // in a run produces a phantom space glyph next to the wide char.
-            if cells[i].ch == '\0' {
+            if cells[i].first_char() == '\0' {
                 i += 1;
                 continue;
             }
             let run_start = i;
             let run_fg = cells[i].fg;
             // End the run on fg change OR any null cell (spacer boundary).
-            while i < cells.len() && cells[i].fg == run_fg && cells[i].ch != '\0' {
+            while i < cells.len() && cells[i].fg == run_fg && cells[i].first_char() != '\0' {
                 i += 1;
             }
             let run_cells = &cells[run_start..i];
             // Replace block/quadrant/circle chars with spaces — they're painted
             // as rects in layout_tui so the glyph would double up and misalign.
             // Keep hollow circle (○) as a glyph since we don't paint an outline.
-            let text: String = run_cells.iter().map(|c| {
-                if (c.ch as u32) < 32 { ' ' }
-                else if matches!(c.ch, '○') { c.ch }
-                else if block_char_geom(c.ch).is_some() { ' ' }
-                else { c.ch }
-            }).collect();
+            // Multi-codepoint graphemes (ZWJ emoji, skin tones, flags) pass through
+            // unchanged so cosmic-text can shape the full cluster.
+            let mut text = String::new();
+            for c in run_cells.iter() {
+                let fc = c.first_char();
+                if (fc as u32) < 32 {
+                    text.push(' ');
+                } else if c.grapheme.chars().count() > 1 {
+                    // Multi-codepoint grapheme — keep the full cluster verbatim.
+                    text.push_str(&c.grapheme);
+                } else if matches!(fc, '○') {
+                    text.push(fc);
+                } else if block_char_geom(fc).is_some() {
+                    text.push(' ');
+                } else {
+                    text.push(fc);
+                }
+            }
             if text.trim().is_empty() { continue; }
 
             let color = GlyphColor::rgb(
@@ -2028,17 +2225,60 @@ impl Renderer {
             // a '\0' spacer in the adjacent column. Without this, the icon is clipped at
             // the run boundary and the spacer cell appears as a blank colored strip.
             let mut end_col = i;
-            while end_col < cells.len() && cells[end_col].ch == '\0' {
+            while end_col < cells.len() && cells[end_col].first_char() == '\0' {
                 end_col += 1;
             }
             let col_span = end_col - run_start;
             let w = (col_span as f32 * cell_w).ceil();
-            let needs_adv = run_cells.iter().any(|c| c.ch as u32 > 127);
+            let needs_adv = run_cells.iter().any(|c| {
+                c.grapheme.chars().any(|ch| ch as u32 > 127)
+            });
             let shaping = if needs_adv { Shaping::Advanced } else { Shaping::Basic };
             let buf = self.make_tui_run_buffer(&text, color, phys_font, w, shaping);
             result.push((buf, x, w, color));
         }
         result
+    }
+}
+
+/// Paint an underline beneath a single cell rect. `px` is the line thickness
+/// in physical pixels (== scale_factor, min 1). Dotted/dashed use alpha-dim
+/// approximations to avoid segmenting the rect into many tiny quads.
+fn draw_underline(
+    rects: &mut Vec<RectInstance>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    px: f32,
+    style: UnderlineStyle,
+    fg: [f32; 4],
+    dim: [f32; 4],
+    dash: [f32; 4],
+) {
+    let base_y = y + h - px;
+    match style {
+        UnderlineStyle::None => {}
+        UnderlineStyle::Single => {
+            rects.push(RectInstance::filled(x, base_y, w, px, fg));
+        }
+        UnderlineStyle::Double => {
+            let gap = px;
+            let upper = base_y - gap - px;
+            rects.push(RectInstance::filled(x, upper, w, px, fg));
+            rects.push(RectInstance::filled(x, base_y, w, px, fg));
+        }
+        UnderlineStyle::Curly => {
+            // TODO: approximate sine wave — for now a 2px-tall underline.
+            let thick = (px * 2.0).max(2.0);
+            rects.push(RectInstance::filled(x, base_y - px, w, thick, fg));
+        }
+        UnderlineStyle::Dotted => {
+            rects.push(RectInstance::filled(x, base_y, w, px, dim));
+        }
+        UnderlineStyle::Dashed => {
+            rects.push(RectInstance::filled(x, base_y, w, px, dash));
+        }
     }
 }
 
@@ -2182,7 +2422,7 @@ fn block_content_text(block: &Block) -> String {
             output
                 .rows
                 .iter()
-                .map(|row| row.cells.iter().map(|c| c.character).collect::<String>())
+                .map(|row| row.cells.iter().map(|c| c.grapheme.as_str()).collect::<String>())
                 .collect::<Vec<_>>()
                 .join("\n")
         }
