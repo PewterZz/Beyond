@@ -1,7 +1,7 @@
+use anyhow::Result;
 use async_trait::async_trait;
 use beyonder_core::{AgentAction, AgentId, SessionId};
 use tokio_util::sync::CancellationToken;
-use anyhow::Result;
 
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
@@ -11,10 +11,16 @@ pub struct ToolOutput {
 
 impl ToolOutput {
     pub fn ok(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: false }
+        Self {
+            content: content.into(),
+            is_error: false,
+        }
     }
     pub fn error(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: true }
+        Self {
+            content: content.into(),
+            is_error: true,
+        }
     }
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
@@ -38,8 +44,15 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     fn input_schema(&self) -> serde_json::Value;
     fn required_action(&self, input: &serde_json::Value) -> AgentAction;
-    fn collapsed_default(&self) -> bool { false }
-    async fn execute(&self, input: serde_json::Value, ctx: ToolContext, cancel: CancellationToken) -> Result<ToolOutput>;
+    fn collapsed_default(&self) -> bool {
+        false
+    }
+    async fn execute(
+        &self,
+        input: serde_json::Value,
+        ctx: ToolContext,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput>;
 }
 
 /// A pending tool execution request sent from the supervisor to the app layer.
@@ -52,6 +65,6 @@ pub struct ToolExecRequest {
     pub result_tx: tokio::sync::oneshot::Sender<ToolOutput>,
 }
 
-pub mod registry;
 pub mod executor;
+pub mod registry;
 pub mod shell;

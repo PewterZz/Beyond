@@ -174,11 +174,18 @@ impl OllamaBackend {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
-                warn!(chunks_received = chunk_count, "ollama: stream error mid-response: {e}");
+                warn!(
+                    chunks_received = chunk_count,
+                    "ollama: stream error mid-response: {e}"
+                );
                 anyhow::anyhow!("Stream error: {e}")
             })?;
             chunk_count += 1;
-            debug!(chunk = chunk_count, bytes = chunk.len(), "ollama: chunk received");
+            debug!(
+                chunk = chunk_count,
+                bytes = chunk.len(),
+                "ollama: chunk received"
+            );
             buf.extend_from_slice(&chunk);
             while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                 let line: Vec<u8> = buf.drain(..=pos).collect();
@@ -206,7 +213,8 @@ impl OllamaBackend {
                         }
                     }
                     if let Some(tc) = msg.get("tool_calls") {
-                        if let Ok(parsed) = serde_json::from_value::<Vec<OllamaToolCall>>(tc.clone())
+                        if let Ok(parsed) =
+                            serde_json::from_value::<Vec<OllamaToolCall>>(tc.clone())
                         {
                             info!(count = parsed.len(), "ollama: tool calls received");
                             tool_calls.extend(parsed);
@@ -323,10 +331,7 @@ impl super::AgentBackend for OllamaBackend {
         self.pending_tool_calls.clear();
     }
 
-    async fn submit_tool_results(
-        &mut self,
-        results: &[(String, serde_json::Value)],
-    ) -> Result<()> {
+    async fn submit_tool_results(&mut self, results: &[(String, serde_json::Value)]) -> Result<()> {
         for (id, result) in results {
             let tool_name = self
                 .pending_tool_calls

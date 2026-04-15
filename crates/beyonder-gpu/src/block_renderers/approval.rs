@@ -1,9 +1,9 @@
 //! Renderer for ApprovalRequest blocks.
 //! These are the security dialogs — rendered with attention-grabbing amber accent.
 
-use beyonder_core::Block;
-use crate::pipeline::RectInstance;
 use super::render_block_background;
+use crate::pipeline::RectInstance;
+use beyonder_core::Block;
 
 pub fn render_approval_block(
     block: &Block,
@@ -24,8 +24,14 @@ pub fn render_approval_block(
 
     // Header bar — dark Yellow tint
     rects.push(
-        RectInstance::filled(x + scale, y + scale, width - scale * 2.0, 26.0 * scale, [0.200, 0.170, 0.088, 1.0])
-            .with_radius(2.0 * scale),
+        RectInstance::filled(
+            x + scale,
+            y + scale,
+            width - scale * 2.0,
+            26.0 * scale,
+            [0.200, 0.170, 0.088, 1.0],
+        )
+        .with_radius(2.0 * scale),
     );
 
     // Approve (Green dark) / Deny (Red dark) buttons
@@ -34,6 +40,18 @@ pub fn render_approval_block(
     let btn_h = 24.0 * scale;
     let btn_r = 4.0 * scale;
     let gap = 10.0 * scale;
-    rects.push(RectInstance::filled(x + gap, btn_y, btn_w, btn_h, [0.210, 0.500, 0.245, 1.0]).with_radius(btn_r));
-    rects.push(RectInstance::filled(x + gap + btn_w + gap, btn_y, btn_w, btn_h, [0.530, 0.165, 0.220, 1.0]).with_radius(btn_r));
+    rects.push(
+        RectInstance::filled(x + gap, btn_y, btn_w, btn_h, [0.210, 0.500, 0.245, 1.0])
+            .with_radius(btn_r),
+    );
+    rects.push(
+        RectInstance::filled(
+            x + gap + btn_w + gap,
+            btn_y,
+            btn_w,
+            btn_h,
+            [0.530, 0.165, 0.220, 1.0],
+        )
+        .with_radius(btn_r),
+    );
 }

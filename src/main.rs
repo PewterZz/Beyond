@@ -45,7 +45,12 @@ impl BeyonderHandler {
             .enable_all()
             .build()
             .expect("Failed to build tokio runtime");
-        Self { config, app: None, window: None, rt }
+        Self {
+            config,
+            app: None,
+            window: None,
+            rt,
+        }
     }
 }
 

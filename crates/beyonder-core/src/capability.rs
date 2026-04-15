@@ -12,7 +12,11 @@ pub struct Capability {
 
 impl Capability {
     pub fn new(kind: CapabilityKind, scope: CapabilityScope, grant_mode: GrantMode) -> Self {
-        Self { kind, scope, grant_mode }
+        Self {
+            kind,
+            scope,
+            grant_mode,
+        }
     }
 
     /// Check if this capability covers the given action kind and path.
@@ -125,22 +129,30 @@ impl CapabilitySet {
     pub fn default_coding_agent(workspace: PathBuf) -> Self {
         let mut set = Self::default();
         set.add(Capability::new(
-            CapabilityKind::FileRead { patterns: vec!["**".to_string()] },
+            CapabilityKind::FileRead {
+                patterns: vec!["**".to_string()],
+            },
             CapabilityScope::Directory(workspace.clone()),
             GrantMode::Always,
         ));
         set.add(Capability::new(
-            CapabilityKind::FileWrite { patterns: vec!["**".to_string()] },
+            CapabilityKind::FileWrite {
+                patterns: vec!["**".to_string()],
+            },
             CapabilityScope::Directory(workspace.clone()),
             GrantMode::Once,
         ));
         set.add(Capability::new(
-            CapabilityKind::ShellExecute { allowed_commands: None },
+            CapabilityKind::ShellExecute {
+                allowed_commands: None,
+            },
             CapabilityScope::Global,
             GrantMode::PerUse,
         ));
         set.add(Capability::new(
-            CapabilityKind::NetworkAccess { allowed_hosts: vec![] },
+            CapabilityKind::NetworkAccess {
+                allowed_hosts: vec![],
+            },
             CapabilityScope::Global,
             GrantMode::Never,
         ));

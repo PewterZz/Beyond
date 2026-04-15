@@ -45,7 +45,11 @@ pub fn build_system_prompt(cwd: &std::path::Path, tools: &[ToolDescriptor]) -> S
     );
 
     let have = |present: bool| -> &'static str {
-        if present { "available" } else { "NOT installed" }
+        if present {
+            "available"
+        } else {
+            "NOT installed"
+        }
     };
 
     let toolchain = format!(

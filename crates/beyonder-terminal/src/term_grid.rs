@@ -3,10 +3,10 @@
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, TermMode};
-use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor, Rgb};
 use alacritty_terminal::Term;
 use beyonder_core::{TuiCell, UnderlineStyle};
@@ -56,7 +56,12 @@ impl TermGrid {
         let config = Config::default();
         let size = GridSize { cols, rows };
         let term = Term::new(config, &size, VoidListener);
-        Self { term, processor: Processor::new(), cols, rows }
+        Self {
+            term,
+            processor: Processor::new(),
+            cols,
+            rows,
+        }
     }
 
     /// Feed raw PTY bytes into the terminal state machine.
@@ -65,7 +70,11 @@ impl TermGrid {
         // diagnosing glyph/escape-sequence mismatches without fighting stderr.
         if let Ok(path) = std::env::var("BEYONDER_PTY_LOG") {
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 let mut out = String::new();
                 for &b in bytes {
                     match b {
@@ -89,7 +98,10 @@ impl TermGrid {
     /// output from that command, not accumulated history.
     pub fn reset(&mut self) {
         let config = Config::default();
-        let size = GridSize { cols: self.cols, rows: self.rows };
+        let size = GridSize {
+            cols: self.cols,
+            rows: self.rows,
+        };
         self.term = Term::new(config, &size, VoidListener);
         self.processor = Processor::new();
     }
@@ -174,7 +186,10 @@ impl TermGrid {
         // cursor disappears — matches how real terminals behave.
         let offset = grid.display_offset();
         let visible = row.saturating_add(offset);
-        (visible.min(rows.saturating_add(offset)), col.min(cols.saturating_sub(1)))
+        (
+            visible.min(rows.saturating_add(offset)),
+            col.min(cols.saturating_sub(1)),
+        )
     }
 
     /// Extract the full screen grid as TuiCells.
@@ -213,7 +228,11 @@ impl TermGrid {
                     Some(resolve_color(effective_bg))
                 };
                 // HIDDEN: character is invisible — render as space.
-                let base_ch = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
+                let base_ch = if cell.flags.contains(Flags::HIDDEN) {
+                    ' '
+                } else {
+                    cell.c
+                };
                 // Assemble the full grapheme cluster: base codepoint plus any
                 // zerowidth combining / ZWJ / variation-selector codepoints
                 // alacritty stored alongside it. This is how ZWJ emoji like
@@ -226,7 +245,9 @@ impl TermGrid {
                     }
                 }
 
-                let link = cell.hyperlink().map(|h| std::sync::Arc::new(h.uri().to_string()));
+                let link = cell
+                    .hyperlink()
+                    .map(|h| std::sync::Arc::new(h.uri().to_string()));
                 let underline = if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
                     UnderlineStyle::Double
                 } else if cell.flags.contains(Flags::UNDERCURL) {
@@ -276,40 +297,40 @@ fn resolve_color(color: &AnsiColor) -> [f32; 3] {
 /// app colors look consistent with the rest of the Beyonder interface.
 fn named_to_rgb(color: NamedColor) -> [f32; 3] {
     match color {
-        NamedColor::Black         => [0.271, 0.278, 0.353], // #45475a Surface1
-        NamedColor::Red           => [0.953, 0.545, 0.659], // #f38ba8 Red
-        NamedColor::Green         => [0.651, 0.890, 0.631], // #a6e3a1 Green
-        NamedColor::Yellow        => [0.976, 0.886, 0.686], // #f9e2af Yellow
-        NamedColor::Blue          => [0.537, 0.706, 0.980], // #89b4fa Blue
-        NamedColor::Magenta       => [0.961, 0.761, 0.906], // #f5c2e7 Pink
-        NamedColor::Cyan          => [0.580, 0.886, 0.835], // #94e2d5 Teal
-        NamedColor::White         => [0.729, 0.761, 0.871], // #bac2de Subtext1
-        NamedColor::BrightBlack   => [0.345, 0.357, 0.439], // #585b70 Surface2
-        NamedColor::BrightRed     => [0.953, 0.545, 0.659], // #f38ba8 Red
-        NamedColor::BrightGreen   => [0.651, 0.890, 0.631], // #a6e3a1 Green
-        NamedColor::BrightYellow  => [0.976, 0.886, 0.686], // #f9e2af Yellow
-        NamedColor::BrightBlue    => [0.537, 0.706, 0.980], // #89b4fa Blue
+        NamedColor::Black => [0.271, 0.278, 0.353], // #45475a Surface1
+        NamedColor::Red => [0.953, 0.545, 0.659],   // #f38ba8 Red
+        NamedColor::Green => [0.651, 0.890, 0.631], // #a6e3a1 Green
+        NamedColor::Yellow => [0.976, 0.886, 0.686], // #f9e2af Yellow
+        NamedColor::Blue => [0.537, 0.706, 0.980],  // #89b4fa Blue
+        NamedColor::Magenta => [0.961, 0.761, 0.906], // #f5c2e7 Pink
+        NamedColor::Cyan => [0.580, 0.886, 0.835],  // #94e2d5 Teal
+        NamedColor::White => [0.729, 0.761, 0.871], // #bac2de Subtext1
+        NamedColor::BrightBlack => [0.345, 0.357, 0.439], // #585b70 Surface2
+        NamedColor::BrightRed => [0.953, 0.545, 0.659], // #f38ba8 Red
+        NamedColor::BrightGreen => [0.651, 0.890, 0.631], // #a6e3a1 Green
+        NamedColor::BrightYellow => [0.976, 0.886, 0.686], // #f9e2af Yellow
+        NamedColor::BrightBlue => [0.537, 0.706, 0.980], // #89b4fa Blue
         NamedColor::BrightMagenta => [0.961, 0.761, 0.906], // #f5c2e7 Pink
-        NamedColor::BrightCyan    => [0.580, 0.886, 0.835], // #94e2d5 Teal
-        NamedColor::BrightWhite   => [0.651, 0.678, 0.784], // #a6adc8 Subtext0
-        NamedColor::Foreground    => [0.804, 0.839, 0.957], // #cdd6f4 Text
-        NamedColor::Background    => [0.118, 0.118, 0.180], // #1e1e2e Base
-        _                         => [0.804, 0.839, 0.957], // #cdd6f4 Text
+        NamedColor::BrightCyan => [0.580, 0.886, 0.835], // #94e2d5 Teal
+        NamedColor::BrightWhite => [0.651, 0.678, 0.784], // #a6adc8 Subtext0
+        NamedColor::Foreground => [0.804, 0.839, 0.957], // #cdd6f4 Text
+        NamedColor::Background => [0.118, 0.118, 0.180], // #1e1e2e Base
+        _ => [0.804, 0.839, 0.957],                 // #cdd6f4 Text
     }
 }
 
 fn indexed_to_rgb(idx: u8) -> [f32; 3] {
     match idx {
-        0  => named_to_rgb(NamedColor::Black),
-        1  => named_to_rgb(NamedColor::Red),
-        2  => named_to_rgb(NamedColor::Green),
-        3  => named_to_rgb(NamedColor::Yellow),
-        4  => named_to_rgb(NamedColor::Blue),
-        5  => named_to_rgb(NamedColor::Magenta),
-        6  => named_to_rgb(NamedColor::Cyan),
-        7  => named_to_rgb(NamedColor::White),
-        8  => named_to_rgb(NamedColor::BrightBlack),
-        9  => named_to_rgb(NamedColor::BrightRed),
+        0 => named_to_rgb(NamedColor::Black),
+        1 => named_to_rgb(NamedColor::Red),
+        2 => named_to_rgb(NamedColor::Green),
+        3 => named_to_rgb(NamedColor::Yellow),
+        4 => named_to_rgb(NamedColor::Blue),
+        5 => named_to_rgb(NamedColor::Magenta),
+        6 => named_to_rgb(NamedColor::Cyan),
+        7 => named_to_rgb(NamedColor::White),
+        8 => named_to_rgb(NamedColor::BrightBlack),
+        9 => named_to_rgb(NamedColor::BrightRed),
         10 => named_to_rgb(NamedColor::BrightGreen),
         11 => named_to_rgb(NamedColor::BrightYellow),
         12 => named_to_rgb(NamedColor::BrightBlue),
@@ -321,7 +342,13 @@ fn indexed_to_rgb(idx: u8) -> [f32; 3] {
             let r_idx = i / 36;
             let g_idx = (i % 36) / 6;
             let b_idx = i % 6;
-            let to_f = |v: u8| if v == 0 { 0.0 } else { (55 + v * 40) as f32 / 255.0 };
+            let to_f = |v: u8| {
+                if v == 0 {
+                    0.0
+                } else {
+                    (55 + v * 40) as f32 / 255.0
+                }
+            };
             [to_f(r_idx), to_f(g_idx), to_f(b_idx)]
         }
         232..=255 => {

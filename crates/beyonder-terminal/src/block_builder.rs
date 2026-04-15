@@ -12,7 +12,10 @@ pub enum BuildEvent {
     /// A new block (running or completed).
     Block(Block),
     /// The running block's output changed — re-render it.
-    LiveUpdate { block_id: BlockId, content: BlockContent },
+    LiveUpdate {
+        block_id: BlockId,
+        content: BlockContent,
+    },
 }
 use std::path::PathBuf;
 use std::time::Instant;
@@ -100,10 +103,17 @@ impl BlockBuilder {
                         }
                         Osc133Marker::CmdEnd(code) => {
                             if let BuildState::RunningCommand {
-                                command, output_bytes, started_at,
-                            } = std::mem::replace(&mut self.state, BuildState::AtPrompt) {
+                                command,
+                                output_bytes,
+                                started_at,
+                            } = std::mem::replace(&mut self.state, BuildState::AtPrompt)
+                            {
                                 let duration_ms = started_at.elapsed().as_millis() as u64;
-                                let output = parse_ansi_output(&output_bytes, self.grid_cols, self.grid_rows);
+                                let output = parse_ansi_output(
+                                    &output_bytes,
+                                    self.grid_cols,
+                                    self.grid_rows,
+                                );
                                 let content = BlockContent::ShellCommand {
                                     input: command,
                                     output,
@@ -112,7 +122,10 @@ impl BlockBuilder {
                                     duration_ms: Some(duration_ms),
                                 };
                                 if let Some(id) = self.pending_block_id.take() {
-                                    events.push(BuildEvent::LiveUpdate { block_id: id, content });
+                                    events.push(BuildEvent::LiveUpdate {
+                                        block_id: id,
+                                        content,
+                                    });
                                 }
                             }
                         }
@@ -160,7 +173,11 @@ impl BlockBuilder {
                             } = std::mem::replace(&mut self.state, BuildState::AtPrompt)
                             {
                                 let duration_ms = started_at.elapsed().as_millis() as u64;
-                                let output = parse_ansi_output(&output_bytes, self.grid_cols, self.grid_rows);
+                                let output = parse_ansi_output(
+                                    &output_bytes,
+                                    self.grid_cols,
+                                    self.grid_rows,
+                                );
                                 let content = BlockContent::ShellCommand {
                                     input: command,
                                     output,
@@ -170,7 +187,10 @@ impl BlockBuilder {
                                 };
                                 if let Some(id) = self.pending_block_id.take() {
                                     // Update the running block in place.
-                                    events.push(BuildEvent::LiveUpdate { block_id: id, content });
+                                    events.push(BuildEvent::LiveUpdate {
+                                        block_id: id,
+                                        content,
+                                    });
                                 }
                             }
                         }
@@ -225,8 +245,11 @@ impl BlockBuilder {
     /// Force-complete the running command — used when the PTY process dies without
     /// emitting a CmdEnd marker. Returns a LiveUpdate event if a command was running.
     pub fn force_complete(&mut self, exit_code: Option<u32>) -> Option<BuildEvent> {
-        if let BuildState::RunningCommand { command, output_bytes, started_at } =
-            std::mem::replace(&mut self.state, BuildState::AtPrompt)
+        if let BuildState::RunningCommand {
+            command,
+            output_bytes,
+            started_at,
+        } = std::mem::replace(&mut self.state, BuildState::AtPrompt)
         {
             let duration_ms = started_at.elapsed().as_millis() as u64;
             let output = parse_ansi_output(&output_bytes, self.grid_cols, self.grid_rows);
@@ -238,7 +261,10 @@ impl BlockBuilder {
                 duration_ms: Some(duration_ms),
             };
             if let Some(id) = self.pending_block_id.take() {
-                return Some(BuildEvent::LiveUpdate { block_id: id, content });
+                return Some(BuildEvent::LiveUpdate {
+                    block_id: id,
+                    content,
+                });
             }
         }
         None
@@ -255,9 +281,13 @@ enum Osc133Marker {
 
 fn parse_osc_133(bytes: &[u8]) -> Option<(Osc133Marker, usize)> {
     let prefix = b"\x1b]133;";
-    if !bytes.starts_with(prefix) { return None; }
+    if !bytes.starts_with(prefix) {
+        return None;
+    }
     let rest = &bytes[prefix.len()..];
-    let end = rest.iter().position(|&b| b == markers::BEL || b == b'\x1b')?;
+    let end = rest
+        .iter()
+        .position(|&b| b == markers::BEL || b == b'\x1b')?;
     let payload = &rest[..end];
     let consumed = prefix.len() + end + 1;
     let marker = match payload {
@@ -266,7 +296,10 @@ fn parse_osc_133(bytes: &[u8]) -> Option<(Osc133Marker, usize)> {
         b"C" => Osc133Marker::CmdExecStart,
         _ if payload == b"D" => Osc133Marker::CmdEnd(0),
         _ if payload.starts_with(b"D;") => {
-            let code = String::from_utf8_lossy(&payload[2..]).trim().parse().unwrap_or(0);
+            let code = String::from_utf8_lossy(&payload[2..])
+                .trim()
+                .parse()
+                .unwrap_or(0);
             Osc133Marker::CmdEnd(code)
         }
         _ => return None,
@@ -293,7 +326,9 @@ fn parse_osc_633(bytes: &[u8]) -> Option<(OscMarker, usize, &[u8])> {
     let rest = &bytes[prefix.len()..];
 
     // Find the BEL (0x07) or ST (ESC \) terminator.
-    let end = rest.iter().position(|&b| b == markers::BEL || b == b'\x1b')?;
+    let end = rest
+        .iter()
+        .position(|&b| b == markers::BEL || b == b'\x1b')?;
     let payload = &rest[..end];
     let consumed = prefix.len() + end + 1; // +1 for BEL
 
@@ -328,12 +363,12 @@ fn parse_ansi_output(bytes: &[u8], cols: usize, rows: usize) -> TerminalOutput {
     let cells = grid.cell_grid();
 
     // Trim trailing blank rows.
-    let last_content = cells
-        .iter()
-        .rposition(|row| row.iter().any(|c| {
+    let last_content = cells.iter().rposition(|row| {
+        row.iter().any(|c| {
             let fc = c.first_char();
             fc != ' ' && fc != '\0'
-        }));
+        })
+    });
     let trimmed = match last_content {
         Some(i) => &cells[..=i],
         None => return TerminalOutput { rows: vec![] },
@@ -368,4 +403,3 @@ fn parse_ansi_output(bytes: &[u8], cols: usize, rows: usize) -> TerminalOutput {
 
     TerminalOutput { rows: rows_out }
 }
-

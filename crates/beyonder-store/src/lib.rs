@@ -1,6 +1,6 @@
 pub mod block_store;
-pub mod session_store;
 pub mod migrations;
+pub mod session_store;
 
 pub use block_store::BlockStore;
 pub use session_store::SessionStore;

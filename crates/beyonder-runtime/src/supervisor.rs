@@ -2,9 +2,9 @@
 //! Agents are first-class processes with lifecycle management.
 
 use anyhow::Result;
-use beyonder_core::{AgentId, AgentInfo, AgentKind, AgentState, CapabilitySet, DeathReason, SessionId};
-use beyonder_acp::AcpClient;
 use beyonder_acp::client::{AgentEvent, StreamPause};
+use beyonder_acp::AcpClient;
+use beyonder_core::{AgentId, AgentInfo, AgentKind, CapabilitySet, DeathReason, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -12,9 +12,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::provider::{
-    AgentBackend,
     ollama::{OllamaBackend, OllamaConfig, ToolDescriptor},
     openai_compat::{OpenAICompatBackend, OpenAICompatConfig},
+    AgentBackend,
 };
 use crate::tools::registry::ToolRegistry;
 use crate::tools::{ToolContext, ToolOutput};
@@ -24,8 +24,14 @@ use crate::tools::{ToolContext, ToolOutput};
 pub enum SupervisorEvent {
     AgentSpawned(AgentInfo),
     AgentReady(AgentId),
-    AgentEvent { agent_id: AgentId, event: AgentEvent },
-    AgentDied { agent_id: AgentId, reason: DeathReason },
+    AgentEvent {
+        agent_id: AgentId,
+        event: AgentEvent,
+    },
+    AgentDied {
+        agent_id: AgentId,
+        reason: DeathReason,
+    },
 }
 
 /// Commands sent to an agent's background turn-driver task.
@@ -48,7 +54,10 @@ pub struct AgentSupervisor {
 
 impl AgentSupervisor {
     pub fn new(event_tx: mpsc::UnboundedSender<SupervisorEvent>) -> Self {
-        Self { agents: HashMap::new(), event_tx }
+        Self {
+            agents: HashMap::new(),
+            event_tx,
+        }
     }
 
     /// Clone the supervisor event sender — used by callers that need to inject events.
@@ -69,7 +78,9 @@ impl AgentSupervisor {
         let agent_id = info.id.clone();
 
         // Extract working directory from the first Directory-scoped capability.
-        let cwd = capabilities.capabilities.iter()
+        let cwd = capabilities
+            .capabilities
+            .iter()
             .find_map(|c| {
                 if let beyonder_core::CapabilityScope::Directory(p) = &c.scope {
                     Some(p.clone())
@@ -90,50 +101,97 @@ impl AgentSupervisor {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 Box::new(AcpClient::spawn(binary, &args, event_tx).await?)
             }
-            AgentKind::Ollama { base_url, model, api_key_env } => {
-                let api_key = api_key_env.as_deref()
+            AgentKind::Ollama {
+                base_url,
+                model,
+                api_key_env,
+            } => {
+                let api_key = api_key_env
+                    .as_deref()
                     .and_then(|env| std::env::var(env).ok());
-                let config = OllamaConfig { base_url: base_url.clone(), model: model.clone(), api_key };
-                let tool_descs: Vec<ToolDescriptor> = registry.all_tools()
+                let config = OllamaConfig {
+                    base_url: base_url.clone(),
+                    model: model.clone(),
+                    api_key,
+                };
+                let tool_descs: Vec<ToolDescriptor> = registry
+                    .all_tools()
                     .map(|t| ToolDescriptor {
                         name: t.name().to_string(),
                         description: t.description().to_string(),
                         schema: t.input_schema(),
                     })
                     .collect();
-                Box::new(OllamaBackend::new(config, event_tx, tool_descs, cwd.clone()))
+                Box::new(OllamaBackend::new(
+                    config,
+                    event_tx,
+                    tool_descs,
+                    cwd.clone(),
+                ))
             }
-            AgentKind::LlamaCpp { base_url, model, api_key_env } => {
-                let api_key = api_key_env.as_deref()
+            AgentKind::LlamaCpp {
+                base_url,
+                model,
+                api_key_env,
+            } => {
+                let api_key = api_key_env
+                    .as_deref()
                     .and_then(|env| std::env::var(env).ok());
-                let config = OpenAICompatConfig { base_url: base_url.clone(), model: model.clone(), api_key };
-                let tool_descs: Vec<ToolDescriptor> = registry.all_tools()
+                let config = OpenAICompatConfig {
+                    base_url: base_url.clone(),
+                    model: model.clone(),
+                    api_key,
+                };
+                let tool_descs: Vec<ToolDescriptor> = registry
+                    .all_tools()
                     .map(|t| ToolDescriptor {
                         name: t.name().to_string(),
                         description: t.description().to_string(),
                         schema: t.input_schema(),
                     })
                     .collect();
-                Box::new(OpenAICompatBackend::new(config, event_tx, tool_descs, cwd.clone()))
+                Box::new(OpenAICompatBackend::new(
+                    config,
+                    event_tx,
+                    tool_descs,
+                    cwd.clone(),
+                ))
             }
-            AgentKind::Mlx { base_url, model, api_key_env } => {
-                let api_key = api_key_env.as_deref()
+            AgentKind::Mlx {
+                base_url,
+                model,
+                api_key_env,
+            } => {
+                let api_key = api_key_env
+                    .as_deref()
                     .and_then(|env| std::env::var(env).ok());
-                let config = OpenAICompatConfig { base_url: base_url.clone(), model: model.clone(), api_key };
-                let tool_descs: Vec<ToolDescriptor> = registry.all_tools()
+                let config = OpenAICompatConfig {
+                    base_url: base_url.clone(),
+                    model: model.clone(),
+                    api_key,
+                };
+                let tool_descs: Vec<ToolDescriptor> = registry
+                    .all_tools()
                     .map(|t| ToolDescriptor {
                         name: t.name().to_string(),
                         description: t.description().to_string(),
                         schema: t.input_schema(),
                     })
                     .collect();
-                Box::new(OpenAICompatBackend::new(config, event_tx, tool_descs, cwd.clone()))
+                Box::new(OpenAICompatBackend::new(
+                    config,
+                    event_tx,
+                    tool_descs,
+                    cwd.clone(),
+                ))
             }
             _ => anyhow::bail!("Unsupported agent kind in MVP"),
         };
 
         info!(%agent_id, %name, "Agent spawned");
-        let _ = self.event_tx.send(SupervisorEvent::AgentSpawned(info.clone()));
+        let _ = self
+            .event_tx
+            .send(SupervisorEvent::AgentSpawned(info.clone()));
 
         // Forward streaming events (TextDelta, Error) from the backend's internal
         // channel to the supervisor channel. This runs independently of turn-driving.
@@ -142,8 +200,10 @@ impl AgentSupervisor {
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 // Unbounded send — never blocks, never deadlocks.
-                let _ = sup_tx_fwd
-                    .send(SupervisorEvent::AgentEvent { agent_id: aid_fwd.clone(), event });
+                let _ = sup_tx_fwd.send(SupervisorEvent::AgentEvent {
+                    agent_id: aid_fwd.clone(),
+                    event,
+                });
             }
         });
 
@@ -156,15 +216,20 @@ impl AgentSupervisor {
             agent_turn_task(aid_driver, backend, registry, cwd, cmd_rx, sup_tx_driver).await;
         });
 
-        self.agents.insert(agent_id.clone(), AgentHandle { info, cmd_tx });
+        self.agents
+            .insert(agent_id.clone(), AgentHandle { info, cmd_tx });
         Ok(agent_id)
     }
 
     /// Send a prompt to an agent — returns immediately, turn runs in background.
     pub fn prompt_agent(&self, agent_id: &AgentId, text: &str) -> Result<()> {
-        let handle = self.agents.get(agent_id)
+        let handle = self
+            .agents
+            .get(agent_id)
             .ok_or_else(|| anyhow::anyhow!("Agent {agent_id} not found"))?;
-        handle.cmd_tx.send(AgentCmd::Prompt(text.to_string()))
+        handle
+            .cmd_tx
+            .send(AgentCmd::Prompt(text.to_string()))
             .map_err(|_| anyhow::anyhow!("Agent {agent_id} turn-driver task is gone"))?;
         Ok(())
     }
@@ -226,7 +291,9 @@ async fn agent_turn_task(
             });
             let _ = sup_tx.send(SupervisorEvent::AgentEvent {
                 agent_id: agent_id.clone(),
-                event: AgentEvent::TurnComplete { stop_reason: "error".into() },
+                event: AgentEvent::TurnComplete {
+                    stop_reason: "error".into(),
+                },
             });
             continue;
         }
@@ -272,7 +339,8 @@ async fn agent_turn_task(
                     // Execute tools, emit results to UI, and collect for the backend.
                     let mut results: Vec<(String, serde_json::Value)> = vec![];
                     for tool in tools {
-                        let output = run_tool(&registry, &tool.name, tool.input.clone(), cwd.clone()).await;
+                        let output =
+                            run_tool(&registry, &tool.name, tool.input.clone(), cwd.clone()).await;
                         let _ = sup_tx.send(SupervisorEvent::AgentEvent {
                             agent_id: agent_id.clone(),
                             event: AgentEvent::ToolResult {

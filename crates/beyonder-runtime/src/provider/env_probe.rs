@@ -88,11 +88,7 @@ impl InternetStatus {
 fn probe_internet() -> InternetStatus {
     use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
     use std::time::Duration;
-    let targets = [
-        "1.1.1.1:443",
-        "8.8.8.8:443",
-        "cloudflare.com:443",
-    ];
+    let targets = ["1.1.1.1:443", "8.8.8.8:443", "cloudflare.com:443"];
     let mut saw_dns_or_connect_failure = false;
     for t in targets {
         match t.to_socket_addrs() {
@@ -105,10 +101,16 @@ fn probe_internet() -> InternetStatus {
                     saw_dns_or_connect_failure = true;
                 }
             }
-            Err(_) => { saw_dns_or_connect_failure = true; }
+            Err(_) => {
+                saw_dns_or_connect_failure = true;
+            }
         }
     }
-    if saw_dns_or_connect_failure { InternetStatus::Offline } else { InternetStatus::Unknown }
+    if saw_dns_or_connect_failure {
+        InternetStatus::Offline
+    } else {
+        InternetStatus::Unknown
+    }
 }
 
 impl EnvProbe {
@@ -124,7 +126,9 @@ Or use `gsed -i 's/a/b/g' file` (GNU sed via brew) when you need GNU extensions 
 BSD sed lacks `\\+` and `\\|` in BRE — use `-E` for ERE, or install `gsed` via brew for GNU behavior."
                 }
             }
-            "linux" => "- `sed -i 's/a/b/g' file` (GNU sed — no empty '' arg; that's a macOS/BSD quirk).",
+            "linux" => {
+                "- `sed -i 's/a/b/g' file` (GNU sed — no empty '' arg; that's a macOS/BSD quirk)."
+            }
             _ => "- `sed -i 's/a/b/g' file` on GNU; `sed -i '' 's/a/b/g' file` on BSD/macOS.",
         }
     }
@@ -144,7 +148,9 @@ fn detect_os_name() -> String {
         if let Ok(out) = Command::new("sw_vers").arg("-productVersion").output() {
             if out.status.success() {
                 let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !v.is_empty() { return format!("macOS {v}"); }
+                if !v.is_empty() {
+                    return format!("macOS {v}");
+                }
             }
         }
         "macOS".to_string()
@@ -161,9 +167,13 @@ fn detect_os_name() -> String {
         "Linux".to_string()
     }
     #[cfg(target_os = "windows")]
-    { "Windows".to_string() }
+    {
+        "Windows".to_string()
+    }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    { std::env::consts::OS.to_string() }
+    {
+        std::env::consts::OS.to_string()
+    }
 }
 
 fn detect_shell() -> String {
@@ -179,11 +189,14 @@ pub fn probe_environment() -> EnvProbe {
     CACHE
         .get_or_init(|| EnvProbe {
             os_name: detect_os_name(),
-            os_family: std::env::consts::FAMILY.to_string().replace("unix", match std::env::consts::OS {
-                "macos" => "macos",
-                "linux" => "linux",
-                other => other,
-            }),
+            os_family: std::env::consts::FAMILY.to_string().replace(
+                "unix",
+                match std::env::consts::OS {
+                    "macos" => "macos",
+                    "linux" => "linux",
+                    other => other,
+                },
+            ),
             arch: std::env::consts::ARCH.to_string(),
             shell: detect_shell(),
             has_rg: have("rg"),

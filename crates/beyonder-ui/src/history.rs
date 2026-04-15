@@ -31,7 +31,12 @@ impl CommandHistory {
         } else {
             vec![]
         };
-        Self { entries, pos: None, draft: String::new(), path }
+        Self {
+            entries,
+            pos: None,
+            draft: String::new(),
+            path,
+        }
     }
 
     /// Push a new entry. Skips empty strings and consecutive duplicates.

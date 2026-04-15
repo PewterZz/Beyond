@@ -175,11 +175,7 @@ impl RectPipeline {
         if instances.is_empty() {
             return;
         }
-        queue.write_buffer(
-            &self.instance_buffer,
-            0,
-            bytemuck::cast_slice(instances),
-        );
+        queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(instances));
     }
 
     pub fn draw<'rp>(&'rp self, pass: &mut wgpu::RenderPass<'rp>, count: u32) {

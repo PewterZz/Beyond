@@ -17,7 +17,10 @@ pub fn render_shell_block(
     scale: f32,
     rects: &mut Vec<RectInstance>,
 ) {
-    let BlockContent::ShellCommand { output, exit_code, .. } = &block.content else {
+    let BlockContent::ShellCommand {
+        output, exit_code, ..
+    } = &block.content
+    else {
         return;
     };
 
@@ -27,10 +30,12 @@ pub fn render_shell_block(
     let last_content = output
         .rows
         .iter()
-        .rposition(|row| row.cells.iter().any(|c| {
-            let fc = c.grapheme.chars().next().unwrap_or('\0');
-            fc != ' ' && fc != '\0'
-        }))
+        .rposition(|row| {
+            row.cells.iter().any(|c| {
+                let fc = c.grapheme.chars().next().unwrap_or('\0');
+                fc != ' ' && fc != '\0'
+            })
+        })
         .map(|i| i + 1)
         .unwrap_or(0);
     let has_output = last_content > 0;
@@ -38,21 +43,20 @@ pub fn render_shell_block(
     // --- Cmd bar (Rect 1) ---
     // Flat terminal background — no tint.
     rects.push(
-        RectInstance::filled(x, y, width, cmd_bar_h, [0.118, 0.118, 0.180, 1.0]).with_radius(3.0 * scale),
+        RectInstance::filled(x, y, width, cmd_bar_h, [0.118, 0.118, 0.180, 1.0])
+            .with_radius(3.0 * scale),
     );
 
     // Left accent stripe (kind-colored) — replaces the running mauve stripe when done.
     let accent = match block.kind {
-        BlockKind::Human    => [0.271, 0.278, 0.353, 0.7],
-        BlockKind::Agent    => [0.537, 0.706, 0.980, 0.85],
+        BlockKind::Human => [0.271, 0.278, 0.353, 0.7],
+        BlockKind::Agent => [0.537, 0.706, 0.980, 0.85],
         BlockKind::Approval => [0.976, 0.886, 0.686, 0.90],
-        BlockKind::System   => [0.271, 0.278, 0.353, 0.4],
-        BlockKind::Tool     => [0.580, 0.886, 0.835, 0.75],
+        BlockKind::System => [0.271, 0.278, 0.353, 0.4],
+        BlockKind::Tool => [0.580, 0.886, 0.835, 0.75],
     };
     let stripe_w = 3.0 * scale;
-    rects.push(
-        RectInstance::filled(x, y, stripe_w, cmd_bar_h, accent).with_radius(scale),
-    );
+    rects.push(RectInstance::filled(x, y, stripe_w, cmd_bar_h, accent).with_radius(scale));
 
     // Running indicator — Mauve pulse strip (overrides accent when actively running).
     if block.status == BlockStatus::Running {

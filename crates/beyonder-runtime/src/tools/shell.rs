@@ -1,15 +1,17 @@
-use async_trait::async_trait;
+use super::{Tool, ToolContext, ToolOutput};
 use anyhow::Result;
-use tokio_util::sync::CancellationToken;
+use async_trait::async_trait;
 use beyonder_core::AgentAction;
 use serde_json::Value;
-use super::{Tool, ToolContext, ToolOutput};
+use tokio_util::sync::CancellationToken;
 
 pub struct ShellExec;
 
 #[async_trait]
 impl Tool for ShellExec {
-    fn name(&self) -> &'static str { "shell.exec" }
+    fn name(&self) -> &'static str {
+        "shell.exec"
+    }
 
     fn description(&self) -> &'static str {
         "Execute a shell command and return its output."
@@ -28,22 +30,35 @@ impl Tool for ShellExec {
     }
 
     fn required_action(&self, input: &Value) -> AgentAction {
-        let cmd = input.get("cmd").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let cmd = input
+            .get("cmd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         AgentAction::ShellExecute { command: cmd }
     }
 
-    fn collapsed_default(&self) -> bool { true }
+    fn collapsed_default(&self) -> bool {
+        true
+    }
 
-    async fn execute(&self, input: Value, ctx: ToolContext, cancel: CancellationToken) -> Result<ToolOutput> {
+    async fn execute(
+        &self,
+        input: Value,
+        ctx: ToolContext,
+        cancel: CancellationToken,
+    ) -> Result<ToolOutput> {
         let cmd = match input.get("cmd").and_then(|v| v.as_str()) {
             Some(c) => c.to_string(),
             None => return Ok(ToolOutput::error("Missing required field: cmd")),
         };
-        let cwd = input.get("cwd")
+        let cwd = input
+            .get("cwd")
             .and_then(|v| v.as_str())
             .map(std::path::PathBuf::from)
             .unwrap_or(ctx.cwd.clone());
-        let timeout_ms = input.get("timeout_ms")
+        let timeout_ms = input
+            .get("timeout_ms")
             .and_then(|v| v.as_u64())
             .unwrap_or(30_000);
 

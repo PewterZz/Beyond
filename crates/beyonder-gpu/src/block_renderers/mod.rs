@@ -1,9 +1,9 @@
-pub mod shell_block;
 pub mod agent_message;
 pub mod approval;
+pub mod shell_block;
 
-use beyonder_core::{Block, BlockContent, BlockKind, BlockStatus};
 use crate::pipeline::RectInstance;
+use beyonder_core::{Block, BlockContent};
 
 /// Trait implemented by each block type's renderer.
 pub trait BlockRenderer {
@@ -26,7 +26,7 @@ pub trait BlockRenderer {
 pub fn measure_block_height(block: &Block, width: f32, font_size: f32) -> f32 {
     let cmd_bar_h = font_size * 2.8; // two-row command bar (meta + command)
     let inner_gap = font_size * 0.4; // visible gap between cmd bar and output panel
-    let header_h = font_size * 1.8;  // header row for non-shell blocks
+    let header_h = font_size * 1.8; // header row for non-shell blocks
     let line_h = font_size * 1.45;
     let v_pad = font_size * 0.6; // bottom padding for output panel
     match &block.content {
@@ -36,10 +36,12 @@ pub fn measure_block_height(block: &Block, width: f32, font_size: f32) -> f32 {
             let last_content = output
                 .rows
                 .iter()
-                .rposition(|row| row.cells.iter().any(|c| {
-                    let fc = c.grapheme.chars().next().unwrap_or('\0');
-                    fc != ' ' && fc != '\0'
-                }))
+                .rposition(|row| {
+                    row.cells.iter().any(|c| {
+                        let fc = c.grapheme.chars().next().unwrap_or('\0');
+                        fc != ' ' && fc != '\0'
+                    })
+                })
                 .map(|i| i + 1)
                 .unwrap_or(0);
             if last_content == 0 {
@@ -58,16 +60,15 @@ pub fn measure_block_height(block: &Block, width: f32, font_size: f32) -> f32 {
             let visual_lines: f32 = content_blocks
                 .iter()
                 .map(|cb| match cb {
-                    beyonder_core::ContentBlock::Text { text } => {
-                        text.lines()
-                            .map(|line| {
-                                let stripped = strip_md_markers(line);
-                                let chars = stripped.chars().count().max(1);
-                                ((chars + chars_per_line - 1) / chars_per_line) as f32
-                            })
-                            .sum::<f32>()
-                            .max(1.0)
-                    }
+                    beyonder_core::ContentBlock::Text { text } => text
+                        .lines()
+                        .map(|line| {
+                            let stripped = strip_md_markers(line);
+                            let chars = stripped.chars().count().max(1);
+                            ((chars + chars_per_line - 1) / chars_per_line) as f32
+                        })
+                        .sum::<f32>()
+                        .max(1.0),
                     beyonder_core::ContentBlock::Code { code, .. } => {
                         // +1 for the fence line
                         code.lines()
@@ -95,7 +96,11 @@ pub fn measure_block_height(block: &Block, width: f32, font_size: f32) -> f32 {
         BlockContent::ApprovalRequest { .. } => font_size * 10.0,
         BlockContent::ToolCall { output, error, .. } => {
             let text = output.as_deref().or(error.as_deref()).unwrap_or("");
-            let lines = if text.is_empty() { 1.0 } else { text.lines().count() as f32 };
+            let lines = if text.is_empty() {
+                1.0
+            } else {
+                text.lines().count() as f32
+            };
             header_h + lines * line_h + v_pad
         }
         BlockContent::Text { text } => {
@@ -109,14 +114,21 @@ pub fn measure_block_height(block: &Block, width: f32, font_size: f32) -> f32 {
 /// Strip leading markdown markers from a line so char-count reflects visible text width.
 fn strip_md_markers(line: &str) -> String {
     let s = line.trim_start_matches('#').trim_start();
-    let s = if s.starts_with("- ") || s.starts_with("* ") { &s[2..] } else { s };
+    let s = if s.starts_with("- ") || s.starts_with("* ") {
+        &s[2..]
+    } else {
+        s
+    };
     // Strip bold/italic markers (**, *, __) — rough, good enough for width estimation.
-    s.replace("**", "").replace('*', "").replace("__", "").replace('`', "")
+    s.replace("**", "")
+        .replace('*', "")
+        .replace("__", "")
+        .replace('`', "")
 }
 
 /// Emit rectangle draw calls for a block's background and border.
 pub fn render_block_background(
-    block: &Block,
+    _block: &Block,
     x: f32,
     y: f32,
     width: f32,
@@ -125,7 +137,6 @@ pub fn render_block_background(
 ) {
     // Flat terminal background — no tint, no border.
     rects.push(
-        RectInstance::filled(x, y, width, height, [0.118, 0.118, 0.180, 1.0])
-            .with_radius(3.0),
+        RectInstance::filled(x, y, width, height, [0.118, 0.118, 0.180, 1.0]).with_radius(3.0),
     );
 }

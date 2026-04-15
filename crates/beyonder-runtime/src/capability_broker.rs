@@ -124,11 +124,7 @@ impl CapabilityBroker {
     }
 
     /// Grant an additional capability to an agent at runtime.
-    pub fn grant_capability(
-        &mut self,
-        agent_id: &AgentId,
-        cap: beyonder_core::Capability,
-    ) {
+    pub fn grant_capability(&mut self, agent_id: &AgentId, cap: beyonder_core::Capability) {
         self.capabilities
             .entry(agent_id.clone())
             .or_default()
@@ -139,7 +135,9 @@ impl CapabilityBroker {
 pub enum ActionDecision {
     Approved,
     Denied(String),
-    NeedsApproval { approval_rx: oneshot::Receiver<ApprovalDecision> },
+    NeedsApproval {
+        approval_rx: oneshot::Receiver<ApprovalDecision>,
+    },
 }
 
 fn action_to_capability_kind(action: &AgentAction) -> CapabilityKind {
@@ -147,16 +145,16 @@ fn action_to_capability_kind(action: &AgentAction) -> CapabilityKind {
         AgentAction::FileRead { .. } => CapabilityKind::FileRead { patterns: vec![] },
         AgentAction::FileWrite { .. } => CapabilityKind::FileWrite { patterns: vec![] },
         AgentAction::FileDelete { .. } => CapabilityKind::FileDelete { patterns: vec![] },
-        AgentAction::ShellExecute { .. } => {
-            CapabilityKind::ShellExecute { allowed_commands: None }
-        }
-        AgentAction::NetworkRequest { .. } => {
-            CapabilityKind::NetworkAccess { allowed_hosts: vec![] }
-        }
+        AgentAction::ShellExecute { .. } => CapabilityKind::ShellExecute {
+            allowed_commands: None,
+        },
+        AgentAction::NetworkRequest { .. } => CapabilityKind::NetworkAccess {
+            allowed_hosts: vec![],
+        },
         AgentAction::AgentSpawn { .. } => CapabilityKind::AgentSpawn,
-        AgentAction::ToolUse { tool_name } => {
-            CapabilityKind::ToolUse { tool_names: vec![tool_name.clone()] }
-        }
+        AgentAction::ToolUse { tool_name } => CapabilityKind::ToolUse {
+            tool_names: vec![tool_name.clone()],
+        },
     }
 }
 
@@ -169,11 +167,7 @@ fn action_path(action: &AgentAction) -> Option<std::path::PathBuf> {
     }
 }
 
-fn make_approval_block(
-    agent_id: &AgentId,
-    action: &AgentAction,
-    session_id: &SessionId,
-) -> Block {
+fn make_approval_block(agent_id: &AgentId, action: &AgentAction, session_id: &SessionId) -> Block {
     let mut block = Block::new(
         BlockKind::Approval,
         session_id.clone(),

@@ -1,14 +1,13 @@
 //! ACP transport layer — JSON-RPC framing over stdio.
 
 use anyhow::Result;
-use bytes::{Buf, BytesMut};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::mpsc;
 use tracing::{debug, error};
 
-use crate::messages::{JsonRpcRequest, JsonRpcResponse};
+use crate::messages::JsonRpcRequest;
 
 /// Sends JSON-RPC messages to an ACP agent over its stdin.
 pub struct StdioSender {

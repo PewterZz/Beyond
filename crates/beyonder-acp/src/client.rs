@@ -6,12 +6,11 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc::UnboundedSender, oneshot};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::messages::{
     methods, AcpContentBlock, AcpMessage, AcpStreamEvent, ClientCapabilities, ClientInfo,
-    ContentDelta, InitializeParams, InitializeResult, JsonRpcRequest, JsonRpcResult,
-    PromptTurnParams,
+    ContentDelta, InitializeParams, InitializeResult, JsonRpcRequest, PromptTurnParams,
 };
 use crate::transport::{StdioReceiver, StdioSender};
 
@@ -71,6 +70,7 @@ pub struct AcpClient {
     sender: StdioSender,
     receiver: StdioReceiver,
     _child: Child,
+    #[allow(dead_code)]
     pending: HashMap<u64, oneshot::Sender<serde_json::Value>>,
     /// Channel to forward streaming events to the caller.
     event_tx: UnboundedSender<AgentEvent>,
@@ -121,16 +121,12 @@ impl AcpClient {
             capabilities: ClientCapabilities::default(),
         };
 
-        let request = JsonRpcRequest::new(
-            id,
-            methods::INITIALIZE,
-            serde_json::to_value(&params)?,
-        );
+        let request = JsonRpcRequest::new(id, methods::INITIALIZE, serde_json::to_value(&params)?);
         self.sender.send(&request).await?;
 
         let response = self.recv_response(id).await?;
-        let _result: InitializeResult = serde_json::from_value(response)
-            .context("Failed to parse initialize result")?;
+        let _result: InitializeResult =
+            serde_json::from_value(response).context("Failed to parse initialize result")?;
 
         let notif = JsonRpcRequest::notification(methods::INITIALIZED, json!({}));
         self.sender.send(&notif).await?;
@@ -147,11 +143,7 @@ impl AcpClient {
             messages: vec![AcpMessage::user(text)],
         };
 
-        let request = JsonRpcRequest::new(
-            id,
-            methods::PROMPT_TURN,
-            serde_json::to_value(&params)?,
-        );
+        let request = JsonRpcRequest::new(id, methods::PROMPT_TURN, serde_json::to_value(&params)?);
         self.sender.send(&request).await?;
         Ok(())
     }
@@ -169,20 +161,21 @@ impl AcpClient {
 
             if let Ok(event) = serde_json::from_value::<AcpStreamEvent>(value.clone()) {
                 match event {
-                    AcpStreamEvent::ContentBlockDelta { index, delta } => {
-                        match delta {
-                            ContentDelta::TextDelta { text } => {
-                                let _ = self.event_tx.send(AgentEvent::TextDelta(text));
-                            }
-                            ContentDelta::InputJsonDelta { partial_json } => {
-                                if let Some(pt) = self.pending_tools.get_mut(&index) {
-                                    pt.input_json.push_str(&partial_json);
-                                }
-                            }
-                            ContentDelta::ThinkingDelta { .. } => {}
+                    AcpStreamEvent::ContentBlockDelta { index, delta } => match delta {
+                        ContentDelta::TextDelta { text } => {
+                            let _ = self.event_tx.send(AgentEvent::TextDelta(text));
                         }
-                    }
-                    AcpStreamEvent::ContentBlockStart { index, content_block } => {
+                        ContentDelta::InputJsonDelta { partial_json } => {
+                            if let Some(pt) = self.pending_tools.get_mut(&index) {
+                                pt.input_json.push_str(&partial_json);
+                            }
+                        }
+                        ContentDelta::ThinkingDelta { .. } => {}
+                    },
+                    AcpStreamEvent::ContentBlockStart {
+                        index,
+                        content_block,
+                    } => {
                         match content_block {
                             AcpContentBlock::ToolUse { id, name, input } => {
                                 if input != serde_json::Value::Null
@@ -190,16 +183,24 @@ impl AcpClient {
                                 {
                                     // Input already present, store as completed right away
                                     // on ContentBlockStop we'll finalize it
-                                    let input_json = serde_json::to_string(&input)
-                                        .unwrap_or_default();
+                                    let input_json =
+                                        serde_json::to_string(&input).unwrap_or_default();
                                     self.pending_tools.insert(
                                         index,
-                                        PartialTool { id, name, input_json },
+                                        PartialTool {
+                                            id,
+                                            name,
+                                            input_json,
+                                        },
                                     );
                                 } else {
                                     self.pending_tools.insert(
                                         index,
-                                        PartialTool { id, name, input_json: String::new() },
+                                        PartialTool {
+                                            id,
+                                            name,
+                                            input_json: String::new(),
+                                        },
                                     );
                                 }
                             }
@@ -233,7 +234,6 @@ impl AcpClient {
                         let _ = self.event_tx.send(AgentEvent::Error(error.clone()));
                         bail!("Agent error: {error}");
                     }
-                    _ => {}
                 }
             }
         }
@@ -266,26 +266,20 @@ impl AcpClient {
         loop {
             match self.stream_until_pause().await? {
                 StreamPause::Done { stop_reason } => {
-                    let _ = self
-                        .event_tx
-                        .send(AgentEvent::TurnComplete { stop_reason });
+                    let _ = self.event_tx.send(AgentEvent::TurnComplete { stop_reason });
                     break;
                 }
                 StreamPause::ToolUse(tools) => {
                     for tool in &tools {
-                        let _ = self
-                            .event_tx
-                            .send(AgentEvent::ToolCallRequested {
-                                id: tool.id.clone(),
-                                name: tool.name.clone(),
-                                input: tool.input.clone(),
-                            });
-                    }
-                    let _ = self
-                        .event_tx
-                        .send(AgentEvent::TurnComplete {
-                            stop_reason: "tool_use".to_string(),
+                        let _ = self.event_tx.send(AgentEvent::ToolCallRequested {
+                            id: tool.id.clone(),
+                            name: tool.name.clone(),
+                            input: tool.input.clone(),
                         });
+                    }
+                    let _ = self.event_tx.send(AgentEvent::TurnComplete {
+                        stop_reason: "tool_use".to_string(),
+                    });
                     break;
                 }
             }
@@ -294,7 +288,11 @@ impl AcpClient {
     }
 
     /// Respond to a tool call with a result (legacy single-call API).
-    pub async fn tool_result(&mut self, tool_use_id: &str, result: serde_json::Value) -> Result<()> {
+    pub async fn tool_result(
+        &mut self,
+        tool_use_id: &str,
+        result: serde_json::Value,
+    ) -> Result<()> {
         let id = next_id();
         let request = JsonRpcRequest::new(
             id,

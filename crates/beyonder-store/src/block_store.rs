@@ -60,9 +60,10 @@ impl<'a> BlockStore<'a> {
     }
 
     pub fn list_for_session(&self, session_id: &SessionId) -> StoreResult<Vec<Block>> {
-        let mut stmt = self.store.conn.prepare(
-            "SELECT data FROM blocks WHERE session_id = ?1 ORDER BY created_at ASC",
-        )?;
+        let mut stmt = self
+            .store
+            .conn
+            .prepare("SELECT data FROM blocks WHERE session_id = ?1 ORDER BY created_at ASC")?;
         let blocks = stmt
             .query_map(params![session_id.0], |row| row.get::<_, String>(0))?
             .filter_map(|r| r.ok())

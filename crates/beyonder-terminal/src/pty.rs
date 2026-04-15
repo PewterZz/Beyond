@@ -6,7 +6,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::info;
 
 /// Events from a PTY session.
 #[derive(Debug, Clone)]
@@ -23,6 +23,7 @@ pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     // Writer cached at spawn — take_writer() can only be called once on some platforms.
     writer: Box<dyn std::io::Write + Send>,
+    #[allow(dead_code)]
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     pub event_rx: mpsc::Receiver<PtyEvent>,
 }
@@ -97,7 +98,9 @@ impl PtySession {
             crate::shell_hooks::ShellKind::Nushell => {
                 // Override --config / --env-config with files that source the
                 // user's real config first, then layer our hooks on top.
-                let nu_dir = std::path::PathBuf::from(&home).join(".config").join("nushell");
+                let nu_dir = std::path::PathBuf::from(&home)
+                    .join(".config")
+                    .join("nushell");
                 let user_cfg = nu_dir.join("config.nu");
                 let user_env = nu_dir.join("env.nu");
 
@@ -118,8 +121,10 @@ impl PtySession {
                 let hooks = crate::shell_hooks::nushell_init_script(&session_id.0);
                 std::fs::write(&cfg_path, format!("{user_cfg_src}\n{hooks}")).ok();
                 cmd.args(&[
-                    "--config", cfg_path.to_str().unwrap_or(""),
-                    "--env-config", env_path.to_str().unwrap_or(""),
+                    "--config",
+                    cfg_path.to_str().unwrap_or(""),
+                    "--env-config",
+                    env_path.to_str().unwrap_or(""),
                 ]);
             }
             crate::shell_hooks::ShellKind::Unknown => {
@@ -141,11 +146,17 @@ impl PtySession {
             cmd.env(k, v);
         }
 
-        let child = pair.slave.spawn_command(cmd).context("Failed to spawn shell")?;
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .context("Failed to spawn shell")?;
         let child = Arc::new(Mutex::new(child));
 
         // Cache the writer immediately — take_writer() can only be called once.
-        let writer = pair.master.take_writer().context("Failed to get PTY writer")?;
+        let writer = pair
+            .master
+            .take_writer()
+            .context("Failed to get PTY writer")?;
 
         let (event_tx, event_rx) = mpsc::channel(1024);
 
@@ -196,7 +207,12 @@ impl PtySession {
     /// Resize the PTY.
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
         self.master
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .context("Failed to resize PTY")
     }
 }

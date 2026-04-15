@@ -22,7 +22,11 @@ impl InputEditor {
 
     pub fn insert(&mut self, ch: char) {
         self.history_idx = None;
-        if self.all_selected { self.text.clear(); self.cursor = 0; self.all_selected = false; }
+        if self.all_selected {
+            self.text.clear();
+            self.cursor = 0;
+            self.all_selected = false;
+        }
         self.text.insert(self.cursor, ch);
         self.cursor += ch.len_utf8();
     }
@@ -30,7 +34,11 @@ impl InputEditor {
     /// Insert a multi-character string at the cursor (used for paste).
     pub fn insert_text(&mut self, s: &str) {
         self.history_idx = None;
-        if self.all_selected { self.text.clear(); self.cursor = 0; self.all_selected = false; }
+        if self.all_selected {
+            self.text.clear();
+            self.cursor = 0;
+            self.all_selected = false;
+        }
         self.text.insert_str(self.cursor, s);
         self.cursor += s.len();
     }
@@ -43,7 +51,9 @@ impl InputEditor {
             self.all_selected = false;
             return;
         }
-        if self.cursor == 0 { return; }
+        if self.cursor == 0 {
+            return;
+        }
         let prev = self.prev_char_boundary();
         self.text.drain(prev..self.cursor);
         self.cursor = prev;
@@ -57,7 +67,9 @@ impl InputEditor {
             self.all_selected = false;
             return;
         }
-        if self.cursor >= self.text.len() { return; }
+        if self.cursor >= self.text.len() {
+            return;
+        }
         let next = self.next_char_boundary();
         self.text.drain(self.cursor..next);
     }
@@ -81,14 +93,20 @@ impl InputEditor {
     pub fn delete_word_backward(&mut self) {
         self.history_idx = None;
         self.all_selected = false;
-        if self.cursor == 0 { return; }
+        if self.cursor == 0 {
+            return;
+        }
         // Skip trailing spaces, then skip the word.
         let mut i = self.cursor;
         while i > 0 && self.text[..i].chars().next_back() == Some(' ') {
             i -= 1;
         }
         while i > 0 && self.text[..i].chars().next_back() != Some(' ') {
-            i -= self.text[..i].chars().next_back().map(|c| c.len_utf8()).unwrap_or(1);
+            i -= self.text[..i]
+                .chars()
+                .next_back()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
         }
         self.text.drain(i..self.cursor);
         self.cursor = i;
@@ -97,13 +115,23 @@ impl InputEditor {
     /// Alt+Left / Opt+Left — move one word left.
     pub fn word_left(&mut self) {
         self.all_selected = false;
-        if self.cursor == 0 { return; }
+        if self.cursor == 0 {
+            return;
+        }
         let mut i = self.cursor;
         while i > 0 && self.text[..i].chars().next_back() == Some(' ') {
-            i -= self.text[..i].chars().next_back().map(|c| c.len_utf8()).unwrap_or(1);
+            i -= self.text[..i]
+                .chars()
+                .next_back()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
         }
         while i > 0 && self.text[..i].chars().next_back() != Some(' ') {
-            i -= self.text[..i].chars().next_back().map(|c| c.len_utf8()).unwrap_or(1);
+            i -= self.text[..i]
+                .chars()
+                .next_back()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
         }
         self.cursor = i;
     }
@@ -112,13 +140,19 @@ impl InputEditor {
     pub fn word_right(&mut self) {
         self.all_selected = false;
         let len = self.text.len();
-        if self.cursor >= len { return; }
+        if self.cursor >= len {
+            return;
+        }
         let mut i = self.cursor;
         while i < len && self.text[i..].chars().next() == Some(' ') {
             i += 1;
         }
         while i < len && self.text[i..].chars().next() != Some(' ') {
-            i += self.text[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+            i += self.text[i..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(1);
         }
         self.cursor = i;
     }

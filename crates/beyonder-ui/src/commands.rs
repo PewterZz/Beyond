@@ -15,23 +15,73 @@ pub struct SlashCommand {
 /// All registered slash commands.
 pub static COMMANDS: &[SlashCommand] = &[
     // ── Generic ──────────────────────────────────────────────────────────────
-    SlashCommand { name: "clear",   usage: "/clear",          description: "Clear all blocks from the stream" },
-    SlashCommand { name: "help",    usage: "/help",           description: "Show available commands" },
-    SlashCommand { name: "quit",    usage: "/quit",           description: "Exit Beyond" },
-    SlashCommand { name: "exit",    usage: "/exit",           description: "Exit Beyond" },
-    SlashCommand { name: "scroll",  usage: "/scroll top|bottom", description: "Jump to top or bottom of block stream" },
-    SlashCommand { name: "font",    usage: "/font <size>",    description: "Set font size (e.g. /font 14)" },
-    SlashCommand { name: "find",    usage: "/find <pattern>", description: "Search blocks with a regex (Cmd+F also toggles)" },
-
+    SlashCommand {
+        name: "clear",
+        usage: "/clear",
+        description: "Clear all blocks from the stream",
+    },
+    SlashCommand {
+        name: "help",
+        usage: "/help",
+        description: "Show available commands",
+    },
+    SlashCommand {
+        name: "quit",
+        usage: "/quit",
+        description: "Exit Beyond",
+    },
+    SlashCommand {
+        name: "exit",
+        usage: "/exit",
+        description: "Exit Beyond",
+    },
+    SlashCommand {
+        name: "scroll",
+        usage: "/scroll top|bottom",
+        description: "Jump to top or bottom of block stream",
+    },
+    SlashCommand {
+        name: "font",
+        usage: "/font <size>",
+        description: "Set font size (e.g. /font 14)",
+    },
+    SlashCommand {
+        name: "find",
+        usage: "/find <pattern>",
+        description: "Search blocks with a regex (Cmd+F also toggles)",
+    },
     // ── Agent ─────────────────────────────────────────────────────────────────
-    SlashCommand { name: "agent",   usage: "/agent list|spawn <name>|kill <id>", description: "Manage running agents" },
-
+    SlashCommand {
+        name: "agent",
+        usage: "/agent list|spawn <name>|kill <id>",
+        description: "Manage running agents",
+    },
     // ── Beyonder-specific ─────────────────────────────────────────────────────
-    SlashCommand { name: "mode",     usage: "/mode auto|cmd|agent", description: "Switch input mode: auto, shell-only (cmd), or agent-only" },
-    SlashCommand { name: "model",    usage: "/model <name>",   description: "Set the active AI model (e.g. qwen2.5-coder:7b)" },
-    SlashCommand { name: "provider", usage: "/provider <name>", description: "Set the active AI provider (ollama | anthropic)" },
-    SlashCommand { name: "session",  usage: "/session new|list", description: "Manage sessions" },
-    SlashCommand { name: "theme",    usage: "/theme <name>",   description: "Switch color theme (catppuccin-mocha | …)" },
+    SlashCommand {
+        name: "mode",
+        usage: "/mode auto|cmd|agent",
+        description: "Switch input mode: auto, shell-only (cmd), or agent-only",
+    },
+    SlashCommand {
+        name: "model",
+        usage: "/model <name>",
+        description: "Set the active AI model (e.g. qwen2.5-coder:7b)",
+    },
+    SlashCommand {
+        name: "provider",
+        usage: "/provider <name>",
+        description: "Set the active AI provider (ollama | anthropic)",
+    },
+    SlashCommand {
+        name: "session",
+        usage: "/session new|list",
+        description: "Manage sessions",
+    },
+    SlashCommand {
+        name: "theme",
+        usage: "/theme <name>",
+        description: "Switch color theme (catppuccin-mocha | …)",
+    },
 ];
 
 /// Return commands whose name starts with `prefix` (case-insensitive).

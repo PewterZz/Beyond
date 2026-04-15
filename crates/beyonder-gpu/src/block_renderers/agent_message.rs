@@ -1,7 +1,7 @@
 //! Renderer for AgentMessage blocks.
 
-use beyonder_core::Block;
 use crate::pipeline::RectInstance;
+use beyonder_core::Block;
 
 pub fn render_agent_message(
     _block: &Block,

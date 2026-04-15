@@ -214,11 +214,18 @@ impl OpenAICompatBackend {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
-                warn!(chunks_received = chunk_count, "oai_compat: stream error mid-response: {e}");
+                warn!(
+                    chunks_received = chunk_count,
+                    "oai_compat: stream error mid-response: {e}"
+                );
                 anyhow::anyhow!("Stream error: {e}")
             })?;
             chunk_count += 1;
-            debug!(chunk = chunk_count, bytes = chunk.len(), "oai_compat: chunk received");
+            debug!(
+                chunk = chunk_count,
+                bytes = chunk.len(),
+                "oai_compat: chunk received"
+            );
             buf.extend_from_slice(&chunk);
 
             // SSE events are delimited by double newlines.
@@ -356,8 +363,16 @@ impl OpenAICompatBackend {
         // Record the assistant turn in conversation history.
         self.messages.push(OAIMessage {
             role: "assistant".to_string(),
-            content: if acc_content.is_empty() { None } else { Some(acc_content) },
-            tool_calls: if assistant_tool_calls.is_empty() { None } else { Some(assistant_tool_calls) },
+            content: if acc_content.is_empty() {
+                None
+            } else {
+                Some(acc_content)
+            },
+            tool_calls: if assistant_tool_calls.is_empty() {
+                None
+            } else {
+                Some(assistant_tool_calls)
+            },
             tool_call_id: None,
         });
 
@@ -406,10 +421,7 @@ impl super::AgentBackend for OpenAICompatBackend {
         self.pending_tool_calls.clear();
     }
 
-    async fn submit_tool_results(
-        &mut self,
-        results: &[(String, serde_json::Value)],
-    ) -> Result<()> {
+    async fn submit_tool_results(&mut self, results: &[(String, serde_json::Value)]) -> Result<()> {
         for (id, result) in results {
             let content = result
                 .get("text")
@@ -498,28 +510,50 @@ mod tests {
                     buf.remove(0);
                 }
                 let event_str = std::str::from_utf8(&event_bytes).unwrap().trim();
-                if event_str.is_empty() { continue; }
+                if event_str.is_empty() {
+                    continue;
+                }
 
                 for line in event_str.lines() {
-                    let data = if let Some(rest) = line.strip_prefix("data:") { rest.trim() } else { continue };
-                    if data == "[DONE]" { continue; }
+                    let data = if let Some(rest) = line.strip_prefix("data:") {
+                        rest.trim()
+                    } else {
+                        continue;
+                    };
+                    if data == "[DONE]" {
+                        continue;
+                    }
 
                     let chunk: ChatCompletionChunk = serde_json::from_str(data).unwrap();
                     for choice in chunk.choices {
                         if let Some(r) = choice.finish_reason {
-                            if !r.is_empty() && r != "null" { finish_reason = r; }
+                            if !r.is_empty() && r != "null" {
+                                finish_reason = r;
+                            }
                         }
-                        if let Some(c) = choice.delta.content { acc_content.push_str(&c); }
+                        if let Some(c) = choice.delta.content {
+                            acc_content.push_str(&c);
+                        }
                         if let Some(tc_deltas) = choice.delta.tool_calls {
                             for tc in tc_deltas {
                                 while partial_calls.len() <= tc.index {
-                                    partial_calls.push(PartialToolCall { id: String::new(), name: String::new(), arguments_buf: String::new() });
+                                    partial_calls.push(PartialToolCall {
+                                        id: String::new(),
+                                        name: String::new(),
+                                        arguments_buf: String::new(),
+                                    });
                                 }
                                 let partial = &mut partial_calls[tc.index];
-                                if let Some(id) = tc.id { partial.id = id; }
+                                if let Some(id) = tc.id {
+                                    partial.id = id;
+                                }
                                 if let Some(func) = tc.function {
-                                    if let Some(name) = func.name { partial.name = name; }
-                                    if let Some(args) = func.arguments { partial.arguments_buf.push_str(&args); }
+                                    if let Some(name) = func.name {
+                                        partial.name = name;
+                                    }
+                                    if let Some(args) = func.arguments {
+                                        partial.arguments_buf.push_str(&args);
+                                    }
                                 }
                             }
                         }

@@ -45,11 +45,7 @@ pub struct Block {
 }
 
 impl Block {
-    pub fn new(
-        kind: BlockKind,
-        session_id: SessionId,
-        content: BlockContent,
-    ) -> Self {
+    pub fn new(kind: BlockKind, session_id: SessionId, content: BlockContent) -> Self {
         let now = Utc::now();
         Self {
             id: BlockId::new(),
@@ -169,7 +165,11 @@ pub struct TerminalRow {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalCell {
-    #[serde(default, alias = "character", deserialize_with = "deser_grapheme_compat")]
+    #[serde(
+        default,
+        alias = "character",
+        deserialize_with = "deser_grapheme_compat"
+    )]
     pub grapheme: String,
     pub fg: Option<Color>,
     pub bg: Option<Color>,
@@ -230,14 +230,42 @@ pub struct Color {
 }
 
 impl Color {
-    pub const WHITE: Self = Self { r: 255, g: 255, b: 255 };
+    pub const WHITE: Self = Self {
+        r: 255,
+        g: 255,
+        b: 255,
+    };
     pub const BLACK: Self = Self { r: 0, g: 0, b: 0 };
-    pub const GREEN: Self = Self { r: 80, g: 200, b: 120 };
-    pub const RED: Self = Self { r: 220, g: 70, b: 70 };
-    pub const BLUE: Self = Self { r: 80, g: 140, b: 220 };
-    pub const YELLOW: Self = Self { r: 220, g: 200, b: 60 };
-    pub const CYAN: Self = Self { r: 80, g: 200, b: 200 };
-    pub const GRAY: Self = Self { r: 150, g: 150, b: 150 };
+    pub const GREEN: Self = Self {
+        r: 80,
+        g: 200,
+        b: 120,
+    };
+    pub const RED: Self = Self {
+        r: 220,
+        g: 70,
+        b: 70,
+    };
+    pub const BLUE: Self = Self {
+        r: 80,
+        g: 140,
+        b: 220,
+    };
+    pub const YELLOW: Self = Self {
+        r: 220,
+        g: 200,
+        b: 60,
+    };
+    pub const CYAN: Self = Self {
+        r: 80,
+        g: 200,
+        b: 200,
+    };
+    pub const GRAY: Self = Self {
+        r: 150,
+        g: 150,
+        b: 150,
+    };
 
     pub fn to_wgpu(&self) -> [f32; 3] {
         [
@@ -252,9 +280,16 @@ impl Color {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
-    Code { language: Option<String>, code: String },
-    Thinking { thinking: String },
+    Text {
+        text: String,
+    },
+    Code {
+        language: Option<String>,
+        code: String,
+    },
+    Thinking {
+        thinking: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,13 +303,29 @@ pub enum MessageRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentAction {
-    FileWrite { path: PathBuf, content_preview: Option<String> },
-    FileRead { path: PathBuf },
-    FileDelete { path: PathBuf },
-    ShellExecute { command: String },
-    NetworkRequest { url: String, method: String },
-    AgentSpawn { agent_name: String },
-    ToolUse { tool_name: String },
+    FileWrite {
+        path: PathBuf,
+        content_preview: Option<String>,
+    },
+    FileRead {
+        path: PathBuf,
+    },
+    FileDelete {
+        path: PathBuf,
+    },
+    ShellExecute {
+        command: String,
+    },
+    NetworkRequest {
+        url: String,
+        method: String,
+    },
+    AgentSpawn {
+        agent_name: String,
+    },
+    ToolUse {
+        tool_name: String,
+    },
 }
 
 /// A unified diff representing a file change.

@@ -1,21 +1,20 @@
 //! Application state machine — wires all subsystems together.
 
 use anyhow::Result;
+use beyonder_acp::client::AgentEvent;
+use beyonder_config::{BeyonderConfig, ProviderConfig};
 use beyonder_core::{
     AgentKind, Block, BlockContent, BlockKind, BlockStatus, CapabilitySet, Session,
-    TerminalCell, TerminalOutput, TerminalRow,
 };
-use beyonder_config::{BeyonderConfig, ProviderConfig};
 use beyonder_gpu::Renderer;
-use beyonder_acp::client::AgentEvent;
 use beyonder_runtime::{
-    capability_broker::{ApprovalDecision, BrokerEvent, CapabilityBroker},
+    capability_broker::{BrokerEvent, CapabilityBroker},
     supervisor::{AgentSupervisor, SupervisorEvent},
 };
 use beyonder_store::{BlockStore, SessionStore, Store};
-use beyonder_terminal::{BlockBuilder, PtySession, TermGrid};
 use beyonder_terminal::block_builder::BuildEvent;
 use beyonder_terminal::pty::PtyEvent;
+use beyonder_terminal::{BlockBuilder, PtySession, TermGrid};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -35,13 +34,9 @@ fn current_conda_env() -> String {
 }
 
 fn current_node_version() -> String {
-    let output = std::process::Command::new("node")
-        .arg("--version")
-        .output();
+    let output = std::process::Command::new("node").arg("--version").output();
     match output {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout).trim().to_string()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => "—".to_string(),
     }
 }
@@ -51,25 +46,22 @@ fn fetch_conda_envs() -> Vec<String> {
         .args(["env", "list"])
         .output();
     match output {
-        Ok(o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-                .filter_map(|l| l.split_whitespace().next())
-                .map(|s| s.to_string())
-                .collect()
-        }
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .filter_map(|l| l.split_whitespace().next())
+            .map(|s| s.to_string())
+            .collect(),
         _ => vec![],
     }
 }
 
 fn fetch_node_versions() -> Vec<String> {
-    let nvm_dir = std::env::var("NVM_DIR")
-        .unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| format!("{h}/.nvm"))
-                .unwrap_or_default()
-        });
+    let nvm_dir = std::env::var("NVM_DIR").unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| format!("{h}/.nvm"))
+            .unwrap_or_default()
+    });
     let versions_path = std::path::Path::new(&nvm_dir).join("versions").join("node");
     if let Ok(entries) = std::fs::read_dir(&versions_path) {
         let mut versions: Vec<String> = entries
@@ -85,15 +77,23 @@ fn fetch_node_versions() -> Vec<String> {
 }
 
 fn longest_common_prefix(items: &[&str]) -> String {
-    if items.is_empty() { return String::new(); }
+    if items.is_empty() {
+        return String::new();
+    }
     let mut prefix = items[0].to_string();
     for s in &items[1..] {
         let mut new_len = 0;
         for ((i, a), b) in prefix.char_indices().zip(s.chars()) {
-            if a == b { new_len = i + a.len_utf8(); } else { break; }
+            if a == b {
+                new_len = i + a.len_utf8();
+            } else {
+                break;
+            }
         }
         prefix.truncate(new_len);
-        if prefix.is_empty() { break; }
+        if prefix.is_empty() {
+            break;
+        }
     }
     prefix
 }
@@ -130,8 +130,12 @@ fn path_completions(token: &str, cwd: &std::path::Path) -> Vec<String> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let name = e.file_name().into_string().ok()?;
-            if !show_hidden && name.starts_with('.') { return None; }
-            if !name.starts_with(prefix) { return None; }
+            if !show_hidden && name.starts_with('.') {
+                return None;
+            }
+            if !name.starts_with(prefix) {
+                return None;
+            }
             let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             let suffix = if is_dir { "/" } else { "" };
             Some(format!("{dir_part}{name}{suffix}"))
@@ -143,7 +147,9 @@ fn path_completions(token: &str, cwd: &std::path::Path) -> Vec<String> {
 
 /// Command completion: scan `$PATH` for executables starting with `prefix`.
 fn command_completions(prefix: &str) -> Vec<String> {
-    if prefix.is_empty() { return vec![]; }
+    if prefix.is_empty() {
+        return vec![];
+    }
     let path_var = std::env::var("PATH").unwrap_or_default();
     let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for dir in path_var.split(':').filter(|s| !s.is_empty()) {
@@ -158,8 +164,13 @@ fn command_completions(prefix: &str) -> Vec<String> {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let exec = e.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false);
-                        if !exec { continue; }
+                        let exec = e
+                            .metadata()
+                            .map(|m| m.permissions().mode() & 0o111 != 0)
+                            .unwrap_or(false);
+                        if !exec {
+                            continue;
+                        }
                     }
                     seen.insert(name);
                 }
@@ -196,15 +207,17 @@ fn block_to_text(block: &Block) -> String {
             }
             s
         }
-        BlockContent::AgentMessage { content_blocks, .. } => {
-            content_blocks.iter().map(|cb| match cb {
+        BlockContent::AgentMessage { content_blocks, .. } => content_blocks
+            .iter()
+            .map(|cb| match cb {
                 beyonder_core::ContentBlock::Text { text } => text.clone(),
                 beyonder_core::ContentBlock::Code { code, language } => {
                     format!("```{}\n{}\n```", language.as_deref().unwrap_or(""), code)
                 }
                 beyonder_core::ContentBlock::Thinking { thinking } => thinking.clone(),
-            }).collect::<Vec<_>>().join("\n")
-        }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
         BlockContent::Text { text } => text.clone(),
         _ => String::new(),
     }
@@ -222,19 +235,32 @@ fn format_blocks_as_context(blocks: &[Block], watermark: usize) -> String {
     let mut parts: Vec<String> = Vec::new();
     for block in new_blocks {
         match &block.content {
-            BlockContent::ShellCommand { input, output, exit_code, .. } => {
+            BlockContent::ShellCommand {
+                input,
+                output,
+                exit_code,
+                ..
+            } => {
                 let mut entry = format!("$ {}\n", input.trim());
-                let mut lines: Vec<String> = output.rows.iter().map(|row| {
-                    let line: String = row.cells.iter().map(|c| c.grapheme.as_str()).collect();
-                    line.trim_end().to_string()
-                }).filter(|l| !l.is_empty()).collect();
+                let mut lines: Vec<String> = output
+                    .rows
+                    .iter()
+                    .map(|row| {
+                        let line: String = row.cells.iter().map(|c| c.grapheme.as_str()).collect();
+                        line.trim_end().to_string()
+                    })
+                    .filter(|l| !l.is_empty())
+                    .collect();
                 // Truncate very long outputs so context stays token-efficient.
                 const MAX_OUTPUT_LINES: usize = 60;
                 if lines.len() > MAX_OUTPUT_LINES {
                     let kept = MAX_OUTPUT_LINES / 2;
                     let omitted = lines.len() - kept * 2;
-                    lines = lines[..kept].iter()
-                        .chain(std::iter::once(&format!("... ({omitted} lines omitted) ...")))
+                    lines = lines[..kept]
+                        .iter()
+                        .chain(std::iter::once(&format!(
+                            "... ({omitted} lines omitted) ..."
+                        )))
                         .chain(lines[lines.len() - kept..].iter())
                         .cloned()
                         .collect();
@@ -247,16 +273,23 @@ fn format_blocks_as_context(blocks: &[Block], watermark: usize) -> String {
                 }
                 parts.push(entry);
             }
-            BlockContent::AgentMessage { role, content_blocks } => {
+            BlockContent::AgentMessage {
+                role,
+                content_blocks,
+            } => {
                 let label = match role {
                     beyonder_core::MessageRole::User => "User",
                     beyonder_core::MessageRole::Assistant => "Assistant",
                     _ => continue,
                 };
-                let text: String = content_blocks.iter().filter_map(|cb| match cb {
-                    beyonder_core::ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                }).collect::<Vec<_>>().join("\n");
+                let text: String = content_blocks
+                    .iter()
+                    .filter_map(|cb| match cb {
+                        beyonder_core::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 if !text.trim().is_empty() {
                     parts.push(format!("[{label}]: {text}"));
                 }
@@ -276,7 +309,6 @@ fn format_blocks_as_context(blocks: &[Block], watermark: usize) -> String {
         parts.join("\n\n")
     )
 }
-
 
 /// Persistent state for Tab-cycle completion.
 #[derive(Debug, Clone)]
@@ -462,22 +494,20 @@ impl App {
 
         // Spawn the shell PTY.
         let shell_env = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let shell = config
-            .shell
-            .program
-            .as_deref()
-            .unwrap_or(&shell_env);
+        let shell = config.shell.program.as_deref().unwrap_or(&shell_env);
 
-        let pty = match PtySession::spawn_sized(session_id.clone(), shell, &cwd, &[], pty_cols, pty_rows) {
-            Ok(p) => {
-                info!("Shell PTY spawned");
-                Some(p)
-            }
-            Err(e) => {
-                warn!("Failed to spawn PTY: {e}");
-                None
-            }
-        };
+        let pty =
+            match PtySession::spawn_sized(session_id.clone(), shell, &cwd, &[], pty_cols, pty_rows)
+            {
+                Ok(p) => {
+                    info!("Shell PTY spawned");
+                    Some(p)
+                }
+                Err(e) => {
+                    warn!("Failed to spawn PTY: {e}");
+                    None
+                }
+            };
 
         let active_model = config.model.clone();
         let active_provider = config.provider.name().to_string();
@@ -628,7 +658,8 @@ impl App {
             self.renderer.terminal_grid_size()
         };
         self.term_grid.resize(cols as usize, rows as usize);
-        self.block_builder.set_grid_size(cols as usize, rows as usize);
+        self.block_builder
+            .set_grid_size(cols as usize, rows as usize);
         if let Some(pty) = &self.pty {
             let _ = pty.resize(rows, cols);
         }
@@ -657,23 +688,18 @@ impl App {
 
         let shell_env = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         let shell = self.config.shell.program.as_deref().unwrap_or(&shell_env);
-        let pty = match PtySession::spawn_sized(
-            session_id.clone(),
-            shell,
-            &cwd,
-            &[],
-            pty_cols,
-            pty_rows,
-        ) {
-            Ok(p) => {
-                info!("Shell PTY spawned for new tab");
-                Some(p)
-            }
-            Err(e) => {
-                warn!("Failed to spawn PTY for new tab: {e}");
-                None
-            }
-        };
+        let pty =
+            match PtySession::spawn_sized(session_id.clone(), shell, &cwd, &[], pty_cols, pty_rows)
+            {
+                Ok(p) => {
+                    info!("Shell PTY spawned for new tab");
+                    Some(p)
+                }
+                Err(e) => {
+                    warn!("Failed to spawn PTY for new tab: {e}");
+                    None
+                }
+            };
 
         TabState {
             session,
@@ -753,13 +779,21 @@ impl App {
     }
 
     pub fn prev_tab(&mut self) {
-        if self.tabs.len() < 2 { return; }
-        let idx = if self.active_tab == 0 { self.tabs.len() - 1 } else { self.active_tab - 1 };
+        if self.tabs.len() < 2 {
+            return;
+        }
+        let idx = if self.active_tab == 0 {
+            self.tabs.len() - 1
+        } else {
+            self.active_tab - 1
+        };
         self.switch_tab(idx);
     }
 
     pub fn next_tab(&mut self) {
-        if self.tabs.len() < 2 { return; }
+        if self.tabs.len() < 2 {
+            return;
+        }
         let idx = (self.active_tab + 1) % self.tabs.len();
         self.switch_tab(idx);
     }
@@ -771,7 +805,9 @@ impl App {
                 self.renderer.resize(size.width, size.height);
                 // Use full-window dimensions when a TUI app is active (bar is hidden),
                 // above-bar dimensions otherwise.
-                let interactive_cli = self.block_builder.running_command_name()
+                let interactive_cli = self
+                    .block_builder
+                    .running_command_name()
                     .map(|name| matches!(name, "claude" | "claude-code"))
                     .unwrap_or(false);
                 let (cols, rows) = if self.term_grid.tui_active() || interactive_cli {
@@ -780,7 +816,8 @@ impl App {
                     self.renderer.terminal_grid_size()
                 };
                 self.term_grid.resize(cols as usize, rows as usize);
-                self.block_builder.set_grid_size(cols as usize, rows as usize);
+                self.block_builder
+                    .set_grid_size(cols as usize, rows as usize);
                 if let Some(pty) = &self.pty {
                     let _ = pty.resize(rows, cols);
                 }
@@ -797,12 +834,15 @@ impl App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x as f32, position.y as f32);
                 // Update command palette hover.
-                self.renderer.cmd_palette_hovered =
-                    self.renderer.cmd_palette_hit(self.cursor_pos.0, self.cursor_pos.1);
+                self.renderer.cmd_palette_hovered = self
+                    .renderer
+                    .cmd_palette_hit(self.cursor_pos.0, self.cursor_pos.1);
                 // Update dropdown hover highlight.
                 if self.open_pill_dropdown.is_some() {
-                    let hovered = self.renderer.dropdown_hover_at(self.cursor_pos.0, self.cursor_pos.1);
-                    if let Some((pill_idx, ref items, ref mut h)) = self.renderer.open_dropdown {
+                    let hovered = self
+                        .renderer
+                        .dropdown_hover_at(self.cursor_pos.0, self.cursor_pos.1);
+                    if let Some((_pill_idx, ref _items, ref mut h)) = self.renderer.open_dropdown {
                         *h = hovered;
                     }
                 }
@@ -810,11 +850,15 @@ impl App {
                 if self.renderer.tui_active {
                     let mr = self.term_grid.mouse_report_mode();
                     if mr.sgr && (mr.motion || (mr.drag && self.mouse_button_down.is_some())) {
-                        if let Some((cx, cy)) = self.renderer.cell_at_phys(self.cursor_pos.0, self.cursor_pos.1) {
+                        if let Some((cx, cy)) = self
+                            .renderer
+                            .cell_at_phys(self.cursor_pos.0, self.cursor_pos.1)
+                        {
                             if self.last_mouse_cell != Some((cx, cy)) {
                                 self.last_mouse_cell = Some((cx, cy));
                                 let btn = self.mouse_button_down;
-                                let cb = sgr_button_code(btn, false, false) + 32 + self.modifier_bits();
+                                let cb =
+                                    sgr_button_code(btn, false, false) + 32 + self.modifier_bits();
                                 let seq = format!("\x1b[<{cb};{cx};{cy}M");
                                 self.write_to_pty(&seq);
                             }
@@ -831,9 +875,17 @@ impl App {
                 if self.renderer.tui_active {
                     let mr = self.term_grid.mouse_report_mode();
                     if mr.sgr && mr.any() {
-                        if let Some((cx, cy)) = self.renderer.cell_at_phys(self.cursor_pos.0, self.cursor_pos.1) {
-                            let cb = sgr_button_code(Some(*button), false, false) + self.modifier_bits();
-                            let trailer = if *state == ElementState::Pressed { 'M' } else { 'm' };
+                        if let Some((cx, cy)) = self
+                            .renderer
+                            .cell_at_phys(self.cursor_pos.0, self.cursor_pos.1)
+                        {
+                            let cb =
+                                sgr_button_code(Some(*button), false, false) + self.modifier_bits();
+                            let trailer = if *state == ElementState::Pressed {
+                                'M'
+                            } else {
+                                'm'
+                            };
                             let seq = format!("\x1b[<{cb};{cx};{cy}{trailer}");
                             self.write_to_pty(&seq);
                             if *state == ElementState::Released {
@@ -874,7 +926,10 @@ impl App {
                         let step = self.scroll_accum.trunc() as i32;
                         if step != 0 {
                             self.scroll_accum -= step as f32;
-                            if let Some((cx, cy)) = self.renderer.cell_at_phys(self.cursor_pos.0, self.cursor_pos.1) {
+                            if let Some((cx, cy)) = self
+                                .renderer
+                                .cell_at_phys(self.cursor_pos.0, self.cursor_pos.1)
+                            {
                                 let cb_base = if step > 0 { 64 } else { 65 };
                                 let cb = cb_base + self.modifier_bits();
                                 let count = step.abs();
@@ -950,9 +1005,15 @@ impl App {
     /// Modifier mask bits used in SGR mouse Cb (+4 shift, +8 alt, +16 ctrl).
     fn modifier_bits(&self) -> u32 {
         let mut b = 0u32;
-        if self.modifiers.shift_key() { b += 4; }
-        if self.modifiers.alt_key()   { b += 8; }
-        if self.modifiers.control_key() { b += 16; }
+        if self.modifiers.shift_key() {
+            b += 4;
+        }
+        if self.modifiers.alt_key() {
+            b += 8;
+        }
+        if self.modifiers.control_key() {
+            b += 16;
+        }
         b
     }
 
@@ -1033,15 +1094,15 @@ impl App {
             Key::Named(NamedKey::PageUp) => Some(b"\x1b[5~".to_vec()),
             Key::Named(NamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
             // F1–F4: SS3 sequences; F5–F12: CSI sequences.
-            Key::Named(NamedKey::F1)  => Some(b"\x1bOP".to_vec()),
-            Key::Named(NamedKey::F2)  => Some(b"\x1bOQ".to_vec()),
-            Key::Named(NamedKey::F3)  => Some(b"\x1bOR".to_vec()),
-            Key::Named(NamedKey::F4)  => Some(b"\x1bOS".to_vec()),
-            Key::Named(NamedKey::F5)  => Some(b"\x1b[15~".to_vec()),
-            Key::Named(NamedKey::F6)  => Some(b"\x1b[17~".to_vec()),
-            Key::Named(NamedKey::F7)  => Some(b"\x1b[18~".to_vec()),
-            Key::Named(NamedKey::F8)  => Some(b"\x1b[19~".to_vec()),
-            Key::Named(NamedKey::F9)  => Some(b"\x1b[20~".to_vec()),
+            Key::Named(NamedKey::F1) => Some(b"\x1bOP".to_vec()),
+            Key::Named(NamedKey::F2) => Some(b"\x1bOQ".to_vec()),
+            Key::Named(NamedKey::F3) => Some(b"\x1bOR".to_vec()),
+            Key::Named(NamedKey::F4) => Some(b"\x1bOS".to_vec()),
+            Key::Named(NamedKey::F5) => Some(b"\x1b[15~".to_vec()),
+            Key::Named(NamedKey::F6) => Some(b"\x1b[17~".to_vec()),
+            Key::Named(NamedKey::F7) => Some(b"\x1b[18~".to_vec()),
+            Key::Named(NamedKey::F8) => Some(b"\x1b[19~".to_vec()),
+            Key::Named(NamedKey::F9) => Some(b"\x1b[20~".to_vec()),
             Key::Named(NamedKey::F10) => Some(b"\x1b[21~".to_vec()),
             Key::Named(NamedKey::F11) => Some(b"\x1b[23~".to_vec()),
             Key::Named(NamedKey::F12) => Some(b"\x1b[24~".to_vec()),
@@ -1054,12 +1115,12 @@ impl App {
                             lo as u8 & 0x1f
                         } else {
                             match ch {
-                                ' ' => 0x00,            // Ctrl+Space = NUL
-                                '[' => 0x1b,            // Ctrl+[ = ESC
-                                '\\' => 0x1c,           // Ctrl+\ = FS
-                                ']' => 0x1d,            // Ctrl+] = GS
-                                '^' => 0x1e,            // Ctrl+^ = RS
-                                '_' => 0x1f,            // Ctrl+_ = US
+                                ' ' => 0x00,  // Ctrl+Space = NUL
+                                '[' => 0x1b,  // Ctrl+[ = ESC
+                                '\\' => 0x1c, // Ctrl+\ = FS
+                                ']' => 0x1d,  // Ctrl+] = GS
+                                '^' => 0x1e,  // Ctrl+^ = RS
+                                '_' => 0x1f,  // Ctrl+_ = US
                                 _ => return None,
                             }
                         };
@@ -1146,7 +1207,11 @@ impl App {
                     }
                 }
             }
-            let is_output = self.renderer.block_hit_at(pos.1).map(|(_, o)| o).unwrap_or(false);
+            let is_output = self
+                .renderer
+                .block_hit_at(pos.1)
+                .map(|(_, o)| o)
+                .unwrap_or(false);
             self.selected_block = Some(idx);
             self.selected_sub_output = is_output;
             self.renderer.selected_block = Some(idx);
@@ -1208,7 +1273,7 @@ impl App {
         let mut haystack = s;
         while let Some(start) = haystack.find("\x1b]52;") {
             let rest = &haystack[start + 5..]; // skip past "\x1b]52;"
-            // Find the OSC terminator: BEL (\x07) or ST (\x1b\)
+                                               // Find the OSC terminator: BEL (\x07) or ST (\x1b\)
             let (payload, advance) = if let Some(pos) = rest.find('\x07') {
                 (&rest[..pos], pos + 1)
             } else if let Some(pos) = rest.find("\x1b\\") {
@@ -1288,7 +1353,11 @@ impl App {
                     return;
                 }
                 Key::Named(NamedKey::F3) => {
-                    if self.modifiers.shift_key() { self.prev_match(); } else { self.next_match(); }
+                    if self.modifiers.shift_key() {
+                        self.prev_match();
+                    } else {
+                        self.next_match();
+                    }
                     return;
                 }
                 Key::Named(NamedKey::Backspace) => {
@@ -1297,12 +1366,28 @@ impl App {
                     self.renderer.snap_input_scroll_to_cursor();
                     return;
                 }
-                Key::Named(NamedKey::ArrowLeft) => { self.input.move_left(); self.renderer.snap_input_scroll_to_cursor(); return; }
-                Key::Named(NamedKey::ArrowRight) => { self.input.move_right(); self.renderer.snap_input_scroll_to_cursor(); return; }
-                Key::Named(NamedKey::ArrowUp) => { self.prev_match(); return; }
-                Key::Named(NamedKey::ArrowDown) => { self.next_match(); return; }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.input.move_left();
+                    self.renderer.snap_input_scroll_to_cursor();
+                    return;
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.input.move_right();
+                    self.renderer.snap_input_scroll_to_cursor();
+                    return;
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.prev_match();
+                    return;
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    self.next_match();
+                    return;
+                }
                 Key::Character(s) => {
-                    for ch in s.chars() { self.input.insert(ch); }
+                    for ch in s.chars() {
+                        self.input.insert(ch);
+                    }
                     self.update_search_matches();
                     self.renderer.snap_input_scroll_to_cursor();
                     return;
@@ -1330,7 +1415,9 @@ impl App {
                 if s.as_str() == "v" {
                     if let Ok(mut cb) = arboard::Clipboard::new() {
                         if let Ok(text) = cb.get_text() {
-                            if self.term_grid.tui_active() || self.block_builder.is_running_command() {
+                            if self.term_grid.tui_active()
+                                || self.block_builder.is_running_command()
+                            {
                                 // Bracketed paste: wraps pasted text so TUI apps
                                 // (nvim insert mode, etc.) receive it correctly.
                                 let payload = format!("\x1b[200~{text}\x1b[201~");
@@ -1356,10 +1443,22 @@ impl App {
         if super_or_ctrl_tab {
             if let Key::Character(s) = &event.logical_key {
                 match s.as_str() {
-                    "t" => { self.new_tab(); return; }
-                    "w" => { self.close_tab(); return; }
-                    "[" => { self.prev_tab(); return; }
-                    "]" => { self.next_tab(); return; }
+                    "t" => {
+                        self.new_tab();
+                        return;
+                    }
+                    "w" => {
+                        self.close_tab();
+                        return;
+                    }
+                    "[" => {
+                        self.prev_tab();
+                        return;
+                    }
+                    "]" => {
+                        self.next_tab();
+                        return;
+                    }
                     _ => {}
                 }
             }
@@ -1390,8 +1489,15 @@ impl App {
         if super_or_ctrl {
             if let Key::Character(s) = &event.logical_key {
                 match s.as_str() {
-                    "c" => { self.copy_selection(); return; }
-                    "a" => { self.input.select_all(); self.renderer.snap_input_scroll_to_cursor(); return; }
+                    "c" => {
+                        self.copy_selection();
+                        return;
+                    }
+                    "a" => {
+                        self.input.select_all();
+                        self.renderer.snap_input_scroll_to_cursor();
+                        return;
+                    }
                     "x" => {
                         // Cut: copy all input text to clipboard then clear.
                         if !self.input.text.is_empty() {
@@ -1409,8 +1515,16 @@ impl App {
             }
             // Cmd/Ctrl+Left = home, Cmd/Ctrl+Right = end.
             match &event.logical_key {
-                Key::Named(NamedKey::ArrowLeft)  => { self.input.move_home(); self.renderer.snap_input_scroll_to_cursor(); return; }
-                Key::Named(NamedKey::ArrowRight) => { self.input.move_end();  self.renderer.snap_input_scroll_to_cursor(); return; }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.input.move_home();
+                    self.renderer.snap_input_scroll_to_cursor();
+                    return;
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.input.move_end();
+                    self.renderer.snap_input_scroll_to_cursor();
+                    return;
+                }
                 _ => {}
             }
         }
@@ -1418,8 +1532,16 @@ impl App {
         // Alt/Option+Left/Right — word navigation.
         if self.modifiers.alt_key() {
             match &event.logical_key {
-                Key::Named(NamedKey::ArrowLeft)  => { self.input.word_left();  self.renderer.snap_input_scroll_to_cursor(); return; }
-                Key::Named(NamedKey::ArrowRight) => { self.input.word_right(); self.renderer.snap_input_scroll_to_cursor(); return; }
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.input.word_left();
+                    self.renderer.snap_input_scroll_to_cursor();
+                    return;
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.input.word_right();
+                    self.renderer.snap_input_scroll_to_cursor();
+                    return;
+                }
                 _ => {}
             }
         }
@@ -1428,11 +1550,31 @@ impl App {
         if self.modifiers.control_key() {
             if let Key::Character(s) = &event.logical_key {
                 match s.as_str() {
-                    "a" => { self.input.move_home();             self.renderer.snap_input_scroll_to_cursor(); return; }
-                    "e" => { self.input.move_end();              self.renderer.snap_input_scroll_to_cursor(); return; }
-                    "k" => { self.input.kill_to_end();           self.renderer.snap_input_scroll_to_cursor(); return; }
-                    "u" => { self.input.kill_to_start();         self.renderer.snap_input_scroll_to_cursor(); return; }
-                    "w" => { self.input.delete_word_backward();  self.renderer.snap_input_scroll_to_cursor(); return; }
+                    "a" => {
+                        self.input.move_home();
+                        self.renderer.snap_input_scroll_to_cursor();
+                        return;
+                    }
+                    "e" => {
+                        self.input.move_end();
+                        self.renderer.snap_input_scroll_to_cursor();
+                        return;
+                    }
+                    "k" => {
+                        self.input.kill_to_end();
+                        self.renderer.snap_input_scroll_to_cursor();
+                        return;
+                    }
+                    "u" => {
+                        self.input.kill_to_start();
+                        self.renderer.snap_input_scroll_to_cursor();
+                        return;
+                    }
+                    "w" => {
+                        self.input.delete_word_backward();
+                        self.renderer.snap_input_scroll_to_cursor();
+                        return;
+                    }
                     _ => {}
                 }
             }
@@ -1457,8 +1599,8 @@ impl App {
                         self.try_autocomplete_step(true);
                     } else {
                         self.app_mode = match self.app_mode {
-                            AppMode::Auto  => AppMode::Cmd,
-                            AppMode::Cmd   => AppMode::Agent,
+                            AppMode::Auto => AppMode::Cmd,
+                            AppMode::Cmd => AppMode::Agent,
                             AppMode::Agent => AppMode::Auto,
                         };
                     }
@@ -1473,8 +1615,12 @@ impl App {
             Key::Named(NamedKey::Delete) => {
                 self.input.delete_forward();
             }
-            Key::Named(NamedKey::ArrowUp) => { self.input.history_prev(); }
-            Key::Named(NamedKey::ArrowDown) => { self.input.history_next(); }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.input.history_prev();
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.input.history_next();
+            }
             Key::Named(NamedKey::ArrowLeft) => self.input.move_left(),
             Key::Named(NamedKey::ArrowRight) => self.input.move_right(),
             Key::Named(NamedKey::Home) => self.input.move_home(),
@@ -1494,14 +1640,25 @@ impl App {
     }
 
     fn copy_selection(&self) {
-        let Some(idx) = self.selected_block else { return };
-        let Some(block) = self.blocks.get(idx) else { return };
+        let Some(idx) = self.selected_block else {
+            return;
+        };
+        let Some(block) = self.blocks.get(idx) else {
+            return;
+        };
         let text = match &block.content {
             BlockContent::ShellCommand { input, output, .. } => {
                 if self.selected_sub_output {
                     // Copy only the output rows.
-                    output.rows.iter()
-                        .map(|row| row.cells.iter().map(|c| c.grapheme.as_str()).collect::<String>())
+                    output
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            row.cells
+                                .iter()
+                                .map(|c| c.grapheme.as_str())
+                                .collect::<String>()
+                        })
                         .collect::<Vec<_>>()
                         .join("\n")
                 } else {
@@ -1511,7 +1668,9 @@ impl App {
             }
             _ => block_to_text(block),
         };
-        if text.is_empty() { return; }
+        if text.is_empty() {
+            return;
+        }
         if let Ok(mut clipboard) = arboard::Clipboard::new() {
             let _ = clipboard.set_text(text);
         }
@@ -1532,21 +1691,39 @@ impl App {
                 }
                 s
             }
-            BlockContent::AgentMessage { content_blocks, .. } => {
-                content_blocks.iter().map(|cb| match cb {
+            BlockContent::AgentMessage { content_blocks, .. } => content_blocks
+                .iter()
+                .map(|cb| match cb {
                     beyonder_core::ContentBlock::Text { text } => text.clone(),
                     beyonder_core::ContentBlock::Code { code, .. } => code.clone(),
                     beyonder_core::ContentBlock::Thinking { thinking } => thinking.clone(),
-                }).collect::<Vec<_>>().join("\n")
-            }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
             BlockContent::Text { text } => text.clone(),
-            BlockContent::ToolCall { tool_name, input, output, streaming_text, error, .. } => {
+            BlockContent::ToolCall {
+                tool_name,
+                input,
+                output,
+                streaming_text,
+                error,
+                ..
+            } => {
                 let mut s = tool_name.clone();
                 s.push(' ');
                 s.push_str(&input.to_string());
-                if let Some(o) = output { s.push('\n'); s.push_str(o); }
-                if let Some(st) = streaming_text { s.push('\n'); s.push_str(st); }
-                if let Some(e) = error { s.push('\n'); s.push_str(e); }
+                if let Some(o) = output {
+                    s.push('\n');
+                    s.push_str(o);
+                }
+                if let Some(st) = streaming_text {
+                    s.push('\n');
+                    s.push_str(st);
+                }
+                if let Some(e) = error {
+                    s.push('\n');
+                    s.push_str(e);
+                }
                 s
             }
             _ => String::new(),
@@ -1560,19 +1737,25 @@ impl App {
         self.search_pattern = Some(prefill.to_string());
         self.input.select_all();
         self.input.delete_backward();
-        for ch in prefill.chars() { self.input.insert(ch); }
+        for ch in prefill.chars() {
+            self.input.insert(ch);
+        }
         self.update_search_matches();
     }
 
     pub fn exit_search_mode(&mut self) {
-        if self.search_pattern.is_none() { return; }
+        if self.search_pattern.is_none() {
+            return;
+        }
         self.search_pattern = None;
         self.search_matches.clear();
         self.search_current = None;
         self.input.select_all();
         self.input.delete_backward();
         let saved = std::mem::take(&mut self.search_saved_input);
-        for ch in saved.chars() { self.input.insert(ch); }
+        for ch in saved.chars() {
+            self.input.insert(ch);
+        }
         self.renderer.snap_input_scroll_to_cursor();
     }
 
@@ -1584,7 +1767,11 @@ impl App {
             self.search_current = None;
             return;
         }
-        let Some(re) = regex::RegexBuilder::new(&pat).case_insensitive(true).build().ok() else {
+        let Some(re) = regex::RegexBuilder::new(&pat)
+            .case_insensitive(true)
+            .build()
+            .ok()
+        else {
             self.search_current = None;
             return;
         };
@@ -1594,13 +1781,21 @@ impl App {
                 self.search_matches.push(i);
             }
         }
-        self.search_current = if self.search_matches.is_empty() { None } else { Some(0) };
+        self.search_current = if self.search_matches.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
         self.focus_current_match();
     }
 
     fn focus_current_match(&mut self) {
-        let Some(cur) = self.search_current else { return };
-        let Some(&block_idx) = self.search_matches.get(cur) else { return };
+        let Some(cur) = self.search_current else {
+            return;
+        };
+        let Some(&block_idx) = self.search_matches.get(cur) else {
+            return;
+        };
         if let Some(y) = self.renderer.block_top_y(block_idx) {
             let pad = 16.0 * self.renderer.scale_factor;
             self.renderer.viewport.scroll_to((y - pad).max(0.0));
@@ -1608,7 +1803,9 @@ impl App {
     }
 
     pub fn next_match(&mut self) {
-        if self.search_matches.is_empty() { return; }
+        if self.search_matches.is_empty() {
+            return;
+        }
         let n = self.search_matches.len();
         self.search_current = Some(match self.search_current {
             None => 0,
@@ -1618,7 +1815,9 @@ impl App {
     }
 
     pub fn prev_match(&mut self) {
-        if self.search_matches.is_empty() { return; }
+        if self.search_matches.is_empty() {
+            return;
+        }
         let n = self.search_matches.len();
         self.search_current = Some(match self.search_current {
             None => n - 1,
@@ -1670,18 +1869,34 @@ impl App {
 
     /// Replace the cycle's token with the next/previous candidate and persist state.
     fn advance_cycle(&mut self, mut cycle: CompletionCycle, reverse: bool) {
-        if cycle.candidates.is_empty() { return; }
+        if cycle.candidates.is_empty() {
+            return;
+        }
         let n = cycle.candidates.len();
         let next = match cycle.index {
-            None => if reverse { n - 1 } else { 0 },
-            Some(i) => if reverse { (i + n - 1) % n } else { (i + 1) % n },
+            None => {
+                if reverse {
+                    n - 1
+                } else {
+                    0
+                }
+            }
+            Some(i) => {
+                if reverse {
+                    (i + n - 1) % n
+                } else {
+                    (i + 1) % n
+                }
+            }
         };
         cycle.index = Some(next);
         let replacement = cycle.candidates[next].clone();
         // Splice replacement in place of whatever is between token_start and current cursor.
         let cursor = self.input.cursor.min(self.input.text.len());
         let token_start = cycle.token_start.min(self.input.text.len());
-        if cursor < token_start { return; }
+        if cursor < token_start {
+            return;
+        }
         let mut new_text = String::with_capacity(self.input.text.len() + replacement.len());
         new_text.push_str(&self.input.text[..token_start]);
         new_text.push_str(&replacement);
@@ -1698,9 +1913,13 @@ impl App {
         let text = self.input.text.clone();
         if let Some(rest) = text.strip_prefix('/') {
             let token: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
-            if token.len() != rest.len() { return; } // already past the command word
+            if token.len() != rest.len() {
+                return;
+            } // already past the command word
             let matches = commands::filter(&token);
-            if matches.is_empty() { return; }
+            if matches.is_empty() {
+                return;
+            }
             let names: Vec<&str> = matches.iter().map(|c| c.name).collect();
             let lcp = longest_common_prefix(&names);
             if matches.len() == 1 {
@@ -1716,14 +1935,18 @@ impl App {
         }
         if let Some(rest) = text.strip_prefix('@') {
             let token: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
-            if token.len() != rest.len() { return; }
+            if token.len() != rest.len() {
+                return;
+            }
             let agents = self.supervisor.list_agents();
             let names: Vec<String> = agents
                 .into_iter()
                 .map(|a| a.name.clone())
                 .filter(|n| n.starts_with(&token))
                 .collect();
-            if names.is_empty() { return; }
+            if names.is_empty() {
+                return;
+            }
             let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             let lcp = longest_common_prefix(&refs);
             if names.len() == 1 {
@@ -1749,29 +1972,42 @@ impl App {
         let text = self.input.text.clone();
         let cursor = self.input.cursor.min(text.len());
         let token_start = text[..cursor]
-            .rfind(|c: char| c.is_whitespace() || matches!(c, '|' | ';' | '&' | '`' | '$' | '(' | '<' | '>'))
+            .rfind(|c: char| {
+                c.is_whitespace() || matches!(c, '|' | ';' | '&' | '`' | '$' | '(' | '<' | '>')
+            })
             .map(|i| i + text[i..].chars().next().unwrap().len_utf8())
             .unwrap_or(0);
         let token = &text[token_start..cursor];
         let prior = &text[..token_start];
         let is_command_pos = prior.trim().is_empty()
-            || prior.trim_end().ends_with(|c: char| matches!(c, '|' | ';' | '&'));
+            || prior
+                .trim_end()
+                .ends_with(|c: char| matches!(c, '|' | ';' | '&'));
 
         let cwd = self.block_builder.cwd.clone();
-        let candidates: Vec<String> =
-            if !token.starts_with('~') && !token.starts_with('/') && !token.contains('/') && is_command_pos {
-                command_completions(token)
-            } else {
-                path_completions(token, &cwd)
-            };
+        let candidates: Vec<String> = if !token.starts_with('~')
+            && !token.starts_with('/')
+            && !token.contains('/')
+            && is_command_pos
+        {
+            command_completions(token)
+        } else {
+            path_completions(token, &cwd)
+        };
 
-        if candidates.is_empty() { return; }
+        if candidates.is_empty() {
+            return;
+        }
         let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
         let lcp = longest_common_prefix(&refs);
 
         if candidates.len() == 1 {
             let only = &candidates[0];
-            let replacement = if only.ends_with('/') { only.clone() } else { format!("{only} ") };
+            let replacement = if only.ends_with('/') {
+                only.clone()
+            } else {
+                format!("{only} ")
+            };
             self.splice_at(token_start, cursor, &replacement);
             return;
         }
@@ -1800,7 +2036,9 @@ impl App {
     /// Replace text[from..to] with `replacement` and place the cursor at the end of it.
     fn splice_at(&mut self, from: usize, to: usize, replacement: &str) {
         let to = to.min(self.input.text.len());
-        if from > to { return; }
+        if from > to {
+            return;
+        }
         let mut new_text = String::with_capacity(self.input.text.len() + replacement.len());
         new_text.push_str(&self.input.text[..from]);
         new_text.push_str(replacement);
@@ -1847,10 +2085,7 @@ impl App {
 
         // Find agent by name or spawn one.
         let agents = self.supervisor.list_agents();
-        let existing_id = agents
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.id.clone());
+        let existing_id = agents.iter().find(|a| a.name == name).map(|a| a.id.clone());
 
         if let Some(agent_id) = existing_id {
             self.push_pending_agent_block(agent_id.clone());
@@ -1858,45 +2093,49 @@ impl App {
                 error!("Failed to prompt agent {name}: {e}");
             }
         } else {
-            let caps = CapabilitySet::default_coding_agent(
-                self.session.working_directory.clone(),
-            );
+            let caps = CapabilitySet::default_coding_agent(self.session.working_directory.clone());
             let kind = match &self.config.provider {
-                ProviderConfig::Ollama { base_url, api_key_env } => {
+                ProviderConfig::Ollama {
+                    base_url,
+                    api_key_env,
+                } => {
                     // Env var takes precedence over config for cloud detection.
                     let (base_url, api_key_env) = if std::env::var("OLLAMA_API_KEY").is_ok() {
-                        ("https://ollama.com".to_string(), Some("OLLAMA_API_KEY".to_string()))
+                        (
+                            "https://ollama.com".to_string(),
+                            Some("OLLAMA_API_KEY".to_string()),
+                        )
                     } else {
                         (base_url.clone(), api_key_env.clone())
                     };
-                    AgentKind::Ollama { base_url, model: self.active_model.clone(), api_key_env }
-                }
-                ProviderConfig::LlamaCpp { base_url, api_key_env } => {
-                    AgentKind::LlamaCpp {
-                        base_url: base_url.clone(),
+                    AgentKind::Ollama {
+                        base_url,
                         model: self.active_model.clone(),
-                        api_key_env: api_key_env.clone(),
+                        api_key_env,
                     }
                 }
-                ProviderConfig::Mlx { base_url, api_key_env } => {
-                    AgentKind::Mlx {
-                        base_url: base_url.clone(),
-                        model: self.active_model.clone(),
-                        api_key_env: api_key_env.clone(),
-                    }
-                }
+                ProviderConfig::LlamaCpp {
+                    base_url,
+                    api_key_env,
+                } => AgentKind::LlamaCpp {
+                    base_url: base_url.clone(),
+                    model: self.active_model.clone(),
+                    api_key_env: api_key_env.clone(),
+                },
+                ProviderConfig::Mlx {
+                    base_url,
+                    api_key_env,
+                } => AgentKind::Mlx {
+                    base_url: base_url.clone(),
+                    model: self.active_model.clone(),
+                    api_key_env: api_key_env.clone(),
+                },
             };
-            match self
-                .supervisor
-                .spawn_agent(name, kind, caps)
-                .await
-            {
+            match self.supervisor.spawn_agent(name, kind, caps).await {
                 Ok(agent_id) => {
                     self.capability_broker.register_agent(
                         agent_id.clone(),
-                        CapabilitySet::default_coding_agent(
-                            self.session.working_directory.clone(),
-                        ),
+                        CapabilitySet::default_coding_agent(self.session.working_directory.clone()),
                     );
                     self.push_pending_agent_block(agent_id.clone());
                     if let Err(e) = self.supervisor.prompt_agent(&agent_id, &full_prompt) {
@@ -1961,7 +2200,8 @@ impl App {
                 if agents.is_empty() {
                     self.push_text_block("No agents running.".to_string());
                 } else {
-                    let lines: Vec<String> = agents.iter()
+                    let lines: Vec<String> = agents
+                        .iter()
                         .map(|a| format!("{:?}  {}  {:?}", a.id, a.name, a.state))
                         .collect();
                     self.push_text_block(lines.join("\n"));
@@ -1982,7 +2222,9 @@ impl App {
                     warn!("Failed to save config: {e}");
                 }
                 // Kill any live Ollama agent so the next prompt re-spawns with the new model.
-                let ids: Vec<_> = self.supervisor.list_agents()
+                let ids: Vec<_> = self
+                    .supervisor
+                    .list_agents()
                     .iter()
                     .filter(|a| matches!(a.kind, AgentKind::Ollama { .. }))
                     .map(|a| a.id.clone())
@@ -2039,7 +2281,10 @@ impl App {
             }
             ["/theme"] => {
                 let current = self.config.theme.clone();
-                let mut lines = vec![format!("Current theme: {}", current), "Available:".to_string()];
+                let mut lines = vec![
+                    format!("Current theme: {}", current),
+                    "Available:".to_string(),
+                ];
                 for name in beyonder_config::BUILTIN_THEMES {
                     lines.push(format!("  - {}", name));
                 }
@@ -2057,14 +2302,19 @@ impl App {
 
             _ => {
                 warn!("Unknown command: {text}");
-                self.push_text_block(format!("Unknown command: {text}\nType /help for a list of commands."));
+                self.push_text_block(format!(
+                    "Unknown command: {text}\nType /help for a list of commands."
+                ));
             }
         }
     }
 
     /// Push a Human/User prompt echo block so the user can see what they sent.
     fn push_human_prompt_block(&mut self, text: String) {
-        use beyonder_core::{BlockContent, BlockId, BlockKind, BlockStatus, ContentBlock, MessageRole, ProvenanceChain};
+        use beyonder_core::{
+            BlockContent, BlockId, BlockKind, BlockStatus, ContentBlock, MessageRole,
+            ProvenanceChain,
+        };
         let now = chrono::Utc::now();
         let block = Block {
             id: BlockId::new(),
@@ -2088,9 +2338,11 @@ impl App {
 
     /// Push an empty Running agent block immediately so the spinner appears before streaming starts.
     fn push_pending_agent_block(&mut self, agent_id: beyonder_core::AgentId) {
-        use beyonder_core::{BlockContent, BlockId, BlockKind, BlockStatus, MessageRole, ProvenanceChain};
+        use beyonder_core::{
+            BlockContent, BlockId, BlockKind, BlockStatus, MessageRole, ProvenanceChain,
+        };
         let now = chrono::Utc::now();
-        let mut block = Block {
+        let block = Block {
             id: BlockId::new(),
             kind: BlockKind::Agent,
             parent_id: None,
@@ -2199,7 +2451,8 @@ impl App {
 
         let had_pty_output = !pty_output.is_empty();
         // Collect OSC 52 read-query responses before the mutable feed loop.
-        let osc52_responses: Vec<String> = pty_output.iter()
+        let osc52_responses: Vec<String> = pty_output
+            .iter()
             .filter_map(|b| self.handle_osc52(b))
             .collect();
         for bytes in pty_output {
@@ -2235,7 +2488,9 @@ impl App {
         // Treat name-detected interactive CLIs (claude) the same as alt-screen
         // TUIs — the renderer hides the input bar for them, so the PTY should
         // own the full window too.
-        let interactive_cli = self.block_builder.running_command_name()
+        let interactive_cli = self
+            .block_builder
+            .running_command_name()
             .map(|name| matches!(name, "claude" | "claude-code"))
             .unwrap_or(false);
         let tui_now = self.term_grid.tui_active() || interactive_cli;
@@ -2266,13 +2521,19 @@ impl App {
                         }
                         AgentEvent::ToolCallRequested { id, name, input } => {
                             info!(tool = %name, "Agent tool call requested");
-                            self.agent_running_tool.insert(agent_id.clone(), name.clone());
+                            self.agent_running_tool
+                                .insert(agent_id.clone(), name.clone());
                             // Finalize any in-flight agent text block (empty → removed).
                             self.finalize_agent_block(&agent_id);
                             // Show the tool call immediately so the user sees what's running.
                             self.push_tool_call_block(&agent_id, id, name, input);
                         }
-                        AgentEvent::ToolResult { id, name: _, output, is_error } => {
+                        AgentEvent::ToolResult {
+                            id,
+                            name: _,
+                            output,
+                            is_error,
+                        } => {
                             self.complete_tool_call_block(&id, output, is_error);
                             // Push a new empty Running agent block so the spinner stays
                             // visible while we wait for the LLM to resume. The tool name
@@ -2319,7 +2580,6 @@ impl App {
                 self.prompt_agent(&name, cmd).await;
             }
         }
-
     }
 
     fn handle_build_event(&mut self, event: BuildEvent) {
@@ -2368,7 +2628,12 @@ impl App {
                 // Auto mode: exit 127 ("command not found") → silently reroute to agent.
                 // Remove the block so no error appears, then queue the input as an agent prompt.
                 if self.app_mode == AppMode::Auto {
-                    if let BlockContent::ShellCommand { ref input, exit_code: Some(127), .. } = content {
+                    if let BlockContent::ShellCommand {
+                        ref input,
+                        exit_code: Some(127),
+                        ..
+                    } = content
+                    {
                         let cmd = input.trim().to_string();
                         // Remove only the failed shell block — shell commands have no
                         // separate preceding human-prompt block, so removing more would
@@ -2414,17 +2679,20 @@ impl App {
     fn append_agent_text(&mut self, agent_id: &beyonder_core::AgentId, text: &str) {
         // Find the most recent Running agent block for this agent_id.
         let idx = self.blocks.iter().rposition(|b| {
-            b.agent_id.as_ref() == Some(agent_id)
-                && matches!(b.status, BlockStatus::Running)
+            b.agent_id.as_ref() == Some(agent_id) && matches!(b.status, BlockStatus::Running)
         });
 
         if let Some(idx) = idx {
             let block = &mut self.blocks[idx];
             if let BlockContent::AgentMessage { content_blocks, .. } = &mut block.content {
-                if let Some(beyonder_core::ContentBlock::Text { text: t }) = content_blocks.last_mut() {
+                if let Some(beyonder_core::ContentBlock::Text { text: t }) =
+                    content_blocks.last_mut()
+                {
                     t.push_str(text);
                 } else {
-                    content_blocks.push(beyonder_core::ContentBlock::Text { text: text.to_string() });
+                    content_blocks.push(beyonder_core::ContentBlock::Text {
+                        text: text.to_string(),
+                    });
                 }
                 // No per-delta DB write — persist only on finalize to avoid blocking tick().
             }
@@ -2447,12 +2715,12 @@ impl App {
 
     fn finalize_agent_block(&mut self, agent_id: &beyonder_core::AgentId) {
         if let Some(idx) = self.blocks.iter().rposition(|b| {
-            b.agent_id.as_ref() == Some(agent_id)
-                && matches!(b.status, BlockStatus::Running)
+            b.agent_id.as_ref() == Some(agent_id) && matches!(b.status, BlockStatus::Running)
         }) {
             let is_empty = match &self.blocks[idx].content {
-                beyonder_core::BlockContent::AgentMessage { content_blocks, .. } =>
-                    content_blocks.is_empty(),
+                beyonder_core::BlockContent::AgentMessage { content_blocks, .. } => {
+                    content_blocks.is_empty()
+                }
                 _ => false,
             };
             if is_empty {
@@ -2501,13 +2769,19 @@ impl App {
 
     fn complete_tool_call_block(&mut self, tool_use_id: &str, output: String, is_error: bool) {
         if let Some(block) = self.blocks.iter_mut().rev().find(|b| {
-            if let beyonder_core::BlockContent::ToolCall { tool_use_id: tid, .. } = &b.content {
+            if let beyonder_core::BlockContent::ToolCall {
+                tool_use_id: tid, ..
+            } = &b.content
+            {
                 tid == tool_use_id
             } else {
                 false
             }
         }) {
-            if let beyonder_core::BlockContent::ToolCall { output: out, error, .. } = &mut block.content {
+            if let beyonder_core::BlockContent::ToolCall {
+                output: out, error, ..
+            } = &mut block.content
+            {
                 if is_error {
                     *error = Some(output);
                 } else {
@@ -2519,11 +2793,14 @@ impl App {
     }
 
     pub fn render(&mut self) -> Result<()> {
-        self.command_running = self.block_builder.is_running_command() || self.term_grid.tui_active();
+        self.command_running =
+            self.block_builder.is_running_command() || self.term_grid.tui_active();
 
         // Interactive CLIs that take over the terminal but don't use alt-screen
         // (e.g. `claude`) should hide the input bar just like nvim/htop do.
-        let interactive_cli = self.block_builder.running_command_name()
+        let interactive_cli = self
+            .block_builder
+            .running_command_name()
             .map(|name| matches!(name, "claude" | "claude-code"))
             .unwrap_or(false);
 
@@ -2533,7 +2810,9 @@ impl App {
 
         // Tell renderer which block (if any) is the live running command.
         self.renderer.running_block_idx = if self.block_builder.is_running_command() {
-            self.blocks.iter().rposition(|b| b.status == beyonder_core::BlockStatus::Running)
+            self.blocks
+                .iter()
+                .rposition(|b| b.status == beyonder_core::BlockStatus::Running)
         } else {
             None
         };
@@ -2560,16 +2839,22 @@ impl App {
         self.renderer.input_running = self.block_builder.is_running_command();
 
         // Command palette — filter commands by what's been typed after the leading /.
-        self.renderer.command_palette = if let InputMode::Command { ref cmd } = detect_mode(&self.input.text) {
-            let matches = commands::filter(cmd);
-            if matches.is_empty() {
-                None
+        self.renderer.command_palette =
+            if let InputMode::Command { ref cmd } = detect_mode(&self.input.text) {
+                let matches = commands::filter(cmd);
+                if matches.is_empty() {
+                    None
+                } else {
+                    Some(
+                        matches
+                            .iter()
+                            .map(|c| (c.usage.to_string(), c.description.to_string()))
+                            .collect(),
+                    )
+                }
             } else {
-                Some(matches.iter().map(|c| (c.usage.to_string(), c.description.to_string())).collect())
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         // Sync mode switcher label.
         self.renderer.mode_label = self.app_mode.label().to_string();
@@ -2585,7 +2870,8 @@ impl App {
         self.renderer.context_pills = vec![
             format!("conda: {}", self.current_conda),
             format!("node: {}", self.current_node),
-            self.block_builder.cwd
+            self.block_builder
+                .cwd
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("~")
@@ -2615,7 +2901,11 @@ impl App {
 }
 
 /// SGR mouse button code: Left=0, Middle=1, Right=2, None=3 (release placeholder).
-fn sgr_button_code(btn: Option<winit::event::MouseButton>, _wheel_up: bool, _wheel_down: bool) -> u32 {
+fn sgr_button_code(
+    btn: Option<winit::event::MouseButton>,
+    _wheel_up: bool,
+    _wheel_down: bool,
+) -> u32 {
     use winit::event::MouseButton;
     match btn {
         Some(MouseButton::Left) => 0,

@@ -30,14 +30,21 @@ pub enum ProviderConfig {
     },
 }
 
-fn default_ollama_base_url() -> String { "http://localhost:11434".to_string() }
-fn default_local_v1_url() -> String { "http://127.0.0.1:8080/v1".to_string() }
+fn default_ollama_base_url() -> String {
+    "http://localhost:11434".to_string()
+}
+fn default_local_v1_url() -> String {
+    "http://127.0.0.1:8080/v1".to_string()
+}
 
 impl Default for ProviderConfig {
     fn default() -> Self {
         // Respect OLLAMA_API_KEY at default-construction time so the cloud
         // backend activates automatically when the env var is present.
-        if std::env::var("OLLAMA_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+        if std::env::var("OLLAMA_API_KEY")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
             ProviderConfig::Ollama {
                 base_url: "https://ollama.com".to_string(),
                 api_key_env: Some("OLLAMA_API_KEY".to_string()),
@@ -94,9 +101,13 @@ pub struct BeyonderConfig {
     pub provider: ProviderConfig,
 }
 
-fn default_theme_name() -> String { "mocha".to_string() }
+fn default_theme_name() -> String {
+    "mocha".to_string()
+}
 
-fn default_model() -> String { "qwen2.5-coder:7b".to_string() }
+fn default_model() -> String {
+    "qwen2.5-coder:7b".to_string()
+}
 
 impl Default for BeyonderConfig {
     fn default() -> Self {

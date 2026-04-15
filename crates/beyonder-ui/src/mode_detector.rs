@@ -21,7 +21,11 @@ pub fn detect_mode(input: &str) -> InputMode {
     }
 
     if let Some(rest) = trimmed.strip_prefix('@') {
-        let name = rest.split_whitespace().next().unwrap_or("claude").to_string();
+        let name = rest
+            .split_whitespace()
+            .next()
+            .unwrap_or("claude")
+            .to_string();
         return InputMode::Agent { name };
     }
 
@@ -42,7 +46,9 @@ mod tests {
     fn test_agent_mode() {
         assert_eq!(
             detect_mode("@claude fix the bug in main.rs"),
-            InputMode::Agent { name: "claude".to_string() }
+            InputMode::Agent {
+                name: "claude".to_string()
+            }
         );
     }
 
@@ -50,7 +56,9 @@ mod tests {
     fn test_command_mode() {
         assert_eq!(
             detect_mode("/agent list"),
-            InputMode::Command { cmd: "agent".to_string() }
+            InputMode::Command {
+                cmd: "agent".to_string()
+            }
         );
     }
 }

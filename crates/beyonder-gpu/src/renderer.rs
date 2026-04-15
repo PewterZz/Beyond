@@ -1,21 +1,21 @@
 //! Main GPU renderer — wgpu pipeline + glyphon text rendering.
 
 use anyhow::{Context, Result};
-use tracing::debug;
-use beyonder_core::{AgentId, Block, BlockContent, BlockKind, BlockStatus, TuiCell, UnderlineStyle};
+use beyonder_core::{Block, BlockContent, BlockKind, BlockStatus, TuiCell, UnderlineStyle};
 use glyphon::{
     Attrs, Buffer as GlyphBuffer, Cache, Color as GlyphColor, ColorMode, Family, FontSystem,
-    Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds,
-    TextRenderer, Viewport as GlyphViewport,
+    Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer,
+    Viewport as GlyphViewport,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::debug;
 use winit::window::Window;
 
 use crate::block_renderers::{
-    approval::render_approval_block, agent_message::render_agent_message,
-    measure_block_height, render_block_background, shell_block::render_shell_block,
+    agent_message::render_agent_message, approval::render_approval_block, measure_block_height,
+    render_block_background, shell_block::render_shell_block,
 };
 use crate::pipeline::{RectInstance, RectPipeline};
 use crate::viewport::Viewport;
@@ -35,7 +35,9 @@ const TUI_PAD: f32 = 8.0;
 const GAP: f32 = 2.0;
 
 #[inline]
-fn gc(rgb: [u8; 3]) -> GlyphColor { GlyphColor::rgb(rgb[0], rgb[1], rgb[2]) }
+fn gc(rgb: [u8; 3]) -> GlyphColor {
+    GlyphColor::rgb(rgb[0], rgb[1], rgb[2])
+}
 
 pub struct Renderer {
     pub device: wgpu::Device,
@@ -177,7 +179,11 @@ struct TextBufList {
 
 impl TextBufList {
     fn new() -> Self {
-        Self { entries: vec![], keys: vec![], clip_overrides: vec![] }
+        Self {
+            entries: vec![],
+            keys: vec![],
+            clip_overrides: vec![],
+        }
     }
 
     /// Push a non-cached entry (tuple matches Vec::push call sites unchanged).
@@ -188,7 +194,11 @@ impl TextBufList {
     }
 
     /// Push with an explicit clip rect (clip_top, clip_bottom) in physical pixels.
-    fn push_clipped(&mut self, entry: (GlyphBuffer, f32, f32, f32, f32, GlyphColor), clip: (i32, i32)) {
+    fn push_clipped(
+        &mut self,
+        entry: (GlyphBuffer, f32, f32, f32, f32, GlyphColor),
+        clip: (i32, i32),
+    ) {
         self.entries.push(entry);
         self.keys.push(None);
         self.clip_overrides.push(Some(clip));
@@ -275,23 +285,34 @@ impl Renderer {
         let mut font_system = FontSystem::new();
         {
             let db = font_system.db_mut();
-            db.load_font_file("/System/Library/Fonts/Apple Color Emoji.ttc").ok();
-            db.load_font_file("/Library/Fonts/Apple Color Emoji.ttc").ok();
-            db.load_font_file("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf").ok();
+            db.load_font_file("/System/Library/Fonts/Apple Color Emoji.ttc")
+                .ok();
+            db.load_font_file("/Library/Fonts/Apple Color Emoji.ttc")
+                .ok();
+            db.load_font_file("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf")
+                .ok();
         }
         let swash_cache = SwashCache::new();
         let glyph_cache = Cache::new(&device);
         let mut glyph_viewport = GlyphViewport::new(&device, &glyph_cache);
         glyph_viewport.update(
             &queue,
-            Resolution { width: size.width.max(1), height: size.height.max(1) },
+            Resolution {
+                width: size.width.max(1),
+                height: size.height.max(1),
+            },
         );
         // Use Web color mode: our surface is Bgra8Unorm (non-sRGB) and all colour
         // values (palette, rects, glyph attrs) are already in sRGB space.
         // Accurate mode would gamma-decode text colours to linear before upload,
         // making them darker than rect colours which go through unmodified.
-        let mut text_atlas =
-            TextAtlas::with_color_mode(&device, &queue, &glyph_cache, surface_format, ColorMode::Web);
+        let mut text_atlas = TextAtlas::with_color_mode(
+            &device,
+            &queue,
+            &glyph_cache,
+            surface_format,
+            ColorMode::Web,
+        );
         let text_renderer = TextRenderer::new(
             &mut text_atlas,
             &device,
@@ -305,7 +326,8 @@ impl Renderer {
         // Viewport covers only the block-stream area; input bar at bottom is excluded.
         let viewport = Viewport::new(size.width as f32, size.height as f32 - input_bar_h);
 
-        let (cell_w, cell_h, metrics_line_h) = Self::measure_cell_size_static(&mut font_system, font_size, scale_factor);
+        let (cell_w, cell_h, metrics_line_h) =
+            Self::measure_cell_size_static(&mut font_system, font_size, scale_factor);
         let measured_cell_size = (cell_w, cell_h);
         let measured_metrics_line_h = metrics_line_h;
 
@@ -379,13 +401,13 @@ impl Renderer {
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);
         let tab_h = self.tab_bar_height_phys();
-        self.viewport.resize(width as f32, height as f32 - self.computed_bar_h - tab_h);
+        self.viewport
+            .resize(width as f32, height as f32 - self.computed_bar_h - tab_h);
         self.viewport.top_offset = tab_h;
-        self.rect_pipeline.update_screen_size(&self.queue, width as f32, height as f32);
-        self.glyph_viewport.update(
-            &self.queue,
-            Resolution { width, height },
-        );
+        self.rect_pipeline
+            .update_screen_size(&self.queue, width as f32, height as f32);
+        self.glyph_viewport
+            .update(&self.queue, Resolution { width, height });
     }
 
     /// Physical-pixel height of the tab strip. Zero when fewer than 2 tabs or when a TUI app is active.
@@ -410,7 +432,11 @@ impl Renderer {
 
     pub fn set_scale_factor(&mut self, scale_factor: f64) {
         self.scale_factor = scale_factor as f32;
-        let (cell_w, cell_h, metrics_line_h) = Self::measure_cell_size_static(&mut self.font_system, self.font_size, self.scale_factor);
+        let (cell_w, cell_h, metrics_line_h) = Self::measure_cell_size_static(
+            &mut self.font_system,
+            self.font_size,
+            self.scale_factor,
+        );
         self.measured_cell_size = (cell_w, cell_h);
         self.measured_metrics_line_h = metrics_line_h;
     }
@@ -422,7 +448,11 @@ impl Renderer {
     /// Returns (cell_w, cell_h_display, metrics_line_h).
     /// cell_h_display = floor(max_ascent + max_descent) — matches swash's integer pixel height.
     /// metrics_line_h = exact float, so GlyphBuffer centering_offset = 0 (glyphs sit at cell top).
-    fn measure_cell_size_static(font_system: &mut FontSystem, font_size: f32, scale_factor: f32) -> (f32, f32, f32) {
+    fn measure_cell_size_static(
+        font_system: &mut FontSystem,
+        font_size: f32,
+        scale_factor: f32,
+    ) -> (f32, f32, f32) {
         let phys = font_size * scale_factor;
         let metrics = Metrics::new(phys, phys * 2.0);
         let mut buf = GlyphBuffer::new(font_system, metrics);
@@ -558,7 +588,10 @@ impl Renderer {
 
     /// Physical (width, height) of the surface in pixels.
     pub fn surface_size(&self) -> (f32, f32) {
-        (self.surface_config.width as f32, self.surface_config.height as f32)
+        (
+            self.surface_config.width as f32,
+            self.surface_config.height as f32,
+        )
     }
 
     /// Scroll the input text viewport by `delta` physical pixels (positive = down / toward newer text).
@@ -765,15 +798,15 @@ impl Renderer {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder =
-            self.device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("beyonder_frame"),
-                });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("beyonder_frame"),
+            });
 
         // --- Rect layout ---
         let mut rects = if !self.tui_active {
-            let (mut r, total_h) = self.layout_blocks();
+            let (r, total_h) = self.layout_blocks();
             self.viewport.total_content_height = total_h;
             if self.running_block_idx.is_some() && self.viewport.pinned_to_bottom {
                 self.viewport.scroll_to_bottom();
@@ -812,7 +845,10 @@ impl Renderer {
             buf_list.clip_overrides.extend(bar_texts.clip_overrides);
         }
         self.build_tab_bar_text_buffers(&mut buf_list);
-        debug!(entries = buf_list.entries.len(), "render: text buffers built");
+        debug!(
+            entries = buf_list.entries.len(),
+            "render: text buffers built"
+        );
         let win_h = self.surface_config.height as f32;
         // When the bar is hidden, text fills the full window.
         // When visible, text must not render over the input bar.
@@ -823,7 +859,8 @@ impl Renderer {
         };
         // Block-stream text must not bleed above the tab strip.
         let block_clip_top_min = self.tab_bar_height_phys() as i32;
-        let text_areas: Vec<TextArea> = buf_list.entries
+        let text_areas: Vec<TextArea> = buf_list
+            .entries
             .iter()
             .enumerate()
             .map(|(i, (buf, x, y, w, h, color))| {
@@ -833,7 +870,10 @@ impl Renderer {
                 let (clip_top, clip_bottom) = if let Some((ct, cb)) = buf_list.clip_overrides[i] {
                     (ct, cb)
                 } else if i < block_entry_count {
-                    ((*y as i32).max(block_clip_top_min), ((*y + *h) as i32).min(text_clip_bottom as i32))
+                    (
+                        (*y as i32).max(block_clip_top_min),
+                        ((*y + *h) as i32).min(text_clip_bottom as i32),
+                    )
                 } else {
                     ((*y as i32).max(0), (*y + *h) as i32)
                 };
@@ -920,12 +960,15 @@ impl Renderer {
     /// Height for the running block — sized to fit up to the last non-blank
     /// TermGrid row so simple commands don't get a massive 30-row block.
     fn live_block_height(&self, phys_font: f32) -> f32 {
-        let last_content = self.tui_cells
+        let last_content = self
+            .tui_cells
             .iter()
-            .rposition(|row| row.iter().any(|c| {
-                let fc = c.first_char();
-                fc != ' ' && fc != '\0'
-            }))
+            .rposition(|row| {
+                row.iter().any(|c| {
+                    let fc = c.first_char();
+                    fc != ' ' && fc != '\0'
+                })
+            })
             .map(|i| i + 1)
             .unwrap_or(1);
         let (_, cell_h) = self.terminal_cell_size();
@@ -938,8 +981,11 @@ impl Renderer {
     /// Returns true if this block is currently shown collapsed (header only).
     fn is_collapsed(&self, block: &Block) -> bool {
         match &block.content {
-            BlockContent::ToolCall { collapsed_default, output, .. } =>
-                output.is_some() && *collapsed_default && !self.user_expanded.contains(&block.id),
+            BlockContent::ToolCall {
+                collapsed_default,
+                output,
+                ..
+            } => output.is_some() && *collapsed_default && !self.user_expanded.contains(&block.id),
             _ => false,
         }
     }
@@ -962,7 +1008,9 @@ impl Renderer {
     /// Content-space Y (top) of block index `idx`, matching layout_blocks's cursor.
     /// Returns None if idx out of range.
     pub fn block_top_y(&self, idx: usize) -> Option<f32> {
-        if idx >= self.blocks.len() { return None; }
+        if idx >= self.blocks.len() {
+            return None;
+        }
         let sc = self.scale_factor;
         let padding = PADDING * sc;
         let gap = GAP * sc;
@@ -970,7 +1018,9 @@ impl Renderer {
         let content_w = self.viewport.width - padding * 2.0;
         let mut y = padding;
         for (i, b) in self.blocks.iter().enumerate() {
-            if i == idx { return Some(y); }
+            if i == idx {
+                return Some(y);
+            }
             y += self.block_height(i, b, content_w, phys_font) + gap;
         }
         None
@@ -1022,7 +1072,12 @@ impl Renderer {
                     let y_rgb = self.theme.yellow;
                     let is_current = self.search_current_match == Some(match_pos);
                     let alpha = if is_current { 0.35 } else { 0.15 };
-                    let col = [y_rgb[0] as f32 / 255.0, y_rgb[1] as f32 / 255.0, y_rgb[2] as f32 / 255.0, alpha];
+                    let col = [
+                        y_rgb[0] as f32 / 255.0,
+                        y_rgb[1] as f32 / 255.0,
+                        y_rgb[2] as f32 / 255.0,
+                        alpha,
+                    ];
                     rects.push(RectInstance::filled(x, sy, content_w, h, col));
                 }
                 // Cell background rects — live (TermGrid) and completed (stored output).
@@ -1037,11 +1092,19 @@ impl Renderer {
                 if self.running_block_idx == Some(i) && !self.tui_cells.is_empty() {
                     for (row_idx, row) in self.tui_cells.iter().enumerate() {
                         let ry = (content_y + row_idx as f32 * cell_h).floor();
-                        if ry > sy + h { break; }
+                        if ry > sy + h {
+                            break;
+                        }
                         for (col_idx, cell) in row.iter().enumerate() {
                             if let Some(bg) = cell.bg {
                                 let rx = (content_x + col_idx as f32 * cell_w).floor();
-                                rects.push(RectInstance::filled(rx, ry, rect_w, rect_h, [bg[0], bg[1], bg[2], 1.0]));
+                                rects.push(RectInstance::filled(
+                                    rx,
+                                    ry,
+                                    rect_w,
+                                    rect_h,
+                                    [bg[0], bg[1], bg[2], 1.0],
+                                ));
                             }
                         }
                     }
@@ -1049,19 +1112,42 @@ impl Renderer {
                     let (cur_row, cur_col) = self.tui_cursor;
                     let cx = (content_x + cur_col as f32 * cell_w).floor();
                     let cy = (content_y + cur_row as f32 * cell_h).floor();
-                    rects.push(RectInstance::filled(cx, cy, rect_w, rect_h, [0.804, 0.835, 0.918, 0.55]));
+                    rects.push(RectInstance::filled(
+                        cx,
+                        cy,
+                        rect_w,
+                        rect_h,
+                        [0.804, 0.835, 0.918, 0.55],
+                    ));
                 } else if let BlockContent::ShellCommand { output, .. } = &block.content {
                     let bl = self.theme.blue;
-                    let link_col = [bl[0] as f32 / 255.0, bl[1] as f32 / 255.0, bl[2] as f32 / 255.0, 1.0];
+                    let link_col = [
+                        bl[0] as f32 / 255.0,
+                        bl[1] as f32 / 255.0,
+                        bl[2] as f32 / 255.0,
+                        1.0,
+                    ];
                     let ul_h = (1.0 * sc).max(1.0);
                     for (row_idx, row) in output.rows.iter().enumerate() {
                         let ry = (content_y + row_idx as f32 * cell_h).floor();
-                        if ry > sy + h { break; }
+                        if ry > sy + h {
+                            break;
+                        }
                         for (col_idx, cell) in row.cells.iter().enumerate() {
                             let rx = (content_x + col_idx as f32 * cell_w).floor();
                             if let Some(bg) = cell.bg {
-                                rects.push(RectInstance::filled(rx, ry, rect_w, rect_h,
-                                    [bg.r as f32 / 255.0, bg.g as f32 / 255.0, bg.b as f32 / 255.0, 1.0]));
+                                rects.push(RectInstance::filled(
+                                    rx,
+                                    ry,
+                                    rect_w,
+                                    rect_h,
+                                    [
+                                        bg.r as f32 / 255.0,
+                                        bg.g as f32 / 255.0,
+                                        bg.b as f32 / 255.0,
+                                        1.0,
+                                    ],
+                                ));
                             }
                             if let Some(url) = &cell.link {
                                 let ul_y = ry + rect_h - ul_h;
@@ -1069,13 +1155,28 @@ impl Renderer {
                                 link_rects_local.push(([rx, ry, rect_w, rect_h], url.clone()));
                             }
                             if cell.underline != UnderlineStyle::None || cell.strikethrough {
-                                let fg_rgb = cell.fg.map(|c| [c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0])
+                                let fg_rgb = cell
+                                    .fg
+                                    .map(|c| {
+                                        [c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0]
+                                    })
                                     .unwrap_or(self.theme.text.map(|v| v as f32 / 255.0));
                                 let line_col = [fg_rgb[0], fg_rgb[1], fg_rgb[2], 1.0];
                                 let dim_col = [fg_rgb[0], fg_rgb[1], fg_rgb[2], 0.5];
                                 let dash_col = [fg_rgb[0], fg_rgb[1], fg_rgb[2], 0.75];
                                 let px = sc.max(1.0);
-                                draw_underline(&mut rects, rx, ry, rect_w, rect_h, px, cell.underline, line_col, dim_col, dash_col);
+                                draw_underline(
+                                    &mut rects,
+                                    rx,
+                                    ry,
+                                    rect_w,
+                                    rect_h,
+                                    px,
+                                    cell.underline,
+                                    line_col,
+                                    dim_col,
+                                    dash_col,
+                                );
                                 if cell.strikethrough {
                                     let s_y = (ry + rect_h * 0.5).floor();
                                     rects.push(RectInstance::filled(rx, s_y, rect_w, px, line_col));
@@ -1088,7 +1189,8 @@ impl Renderer {
                 if self.selected_block == Some(i) {
                     let cmd_bar_h = phys_font * 2.8;
                     let inner_gap = phys_font * 0.4;
-                    let (hl_y, hl_h) = if matches!(block.content, BlockContent::ShellCommand { .. }) {
+                    let (hl_y, hl_h) = if matches!(block.content, BlockContent::ShellCommand { .. })
+                    {
                         if self.selected_sub_output {
                             let out_y = sy + cmd_bar_h + inner_gap;
                             (out_y, (h - cmd_bar_h - inner_gap).max(1.0))
@@ -1133,7 +1235,13 @@ impl Renderer {
         };
         rects.push(RectInstance::filled(0.0, bar_y, win_w, bar_h, bar_bg));
         let b = self.theme.border;
-        rects.push(RectInstance::filled(0.0, bar_y, win_w, sc.ceil(), [b[0], b[1], b[2], 0.5]));
+        rects.push(RectInstance::filled(
+            0.0,
+            bar_y,
+            win_w,
+            sc.ceil(),
+            [b[0], b[1], b[2], 0.5],
+        ));
 
         // Context pills.
         let pill_hpad = 12.0 * sc;
@@ -1159,8 +1267,14 @@ impl Renderer {
             let icon = pill_icons.get(i).copied().unwrap_or(' ');
             let full_label = format!("{} {}", icon, label);
             let pill_w = full_label.chars().count() as f32 * pill_char_w + 2.0 * pill_hpad;
-            let bg = pill_bgs.get(i).copied().unwrap_or([0.192, 0.196, 0.267, 1.0]);
-            let border = pill_borders.get(i).copied().unwrap_or([0.345, 0.357, 0.439, 0.6]);
+            let bg = pill_bgs
+                .get(i)
+                .copied()
+                .unwrap_or([0.192, 0.196, 0.267, 1.0]);
+            let border = pill_borders
+                .get(i)
+                .copied()
+                .unwrap_or([0.345, 0.357, 0.439, 0.6]);
             rects.push(
                 RectInstance::filled(pill_x, pill_top, pill_w, pill_h, bg)
                     .with_radius(4.0)
@@ -1179,9 +1293,15 @@ impl Renderer {
             let model_w = model_label.chars().count() as f32 * model_char_w + 2.0 * pill_hpad;
             let model_x = win_w - model_w - 14.0 * sc;
             rects.push(
-                RectInstance::filled(model_x, pill_top, model_w, pill_h, [0.090, 0.065, 0.130, 1.0])
-                    .with_radius(4.0)
-                    .with_border(1.0, [0.722, 0.561, 0.957, 0.7]),
+                RectInstance::filled(
+                    model_x,
+                    pill_top,
+                    model_w,
+                    pill_h,
+                    [0.090, 0.065, 0.130, 1.0],
+                )
+                .with_radius(4.0)
+                .with_border(1.0, [0.722, 0.561, 0.957, 0.7]),
             );
         }
 
@@ -1195,12 +1315,12 @@ impl Renderer {
             let mode_bg = match self.mode_label.as_str() {
                 "shell" => [0.065, 0.095, 0.155, 1.0],
                 "agent" => [0.095, 0.065, 0.155, 1.0],
-                _       => [0.098, 0.098, 0.118, 1.0],
+                _ => [0.098, 0.098, 0.118, 1.0],
             };
             let mode_border = match self.mode_label.as_str() {
                 "shell" => [0.537, 0.706, 0.980, 0.8],
                 "agent" => [0.792, 0.651, 0.988, 0.8],
-                _       => [0.345, 0.357, 0.439, 0.6],
+                _ => [0.345, 0.357, 0.439, 0.6],
             };
             rects.push(
                 RectInstance::filled(mode_x, mode_y, mode_w, mode_h, mode_bg)
@@ -1219,7 +1339,9 @@ impl Renderer {
                 let n = items.len();
                 let dd_h_total = n as f32 * item_h;
                 let dd_y_start = bar_y - dd_h_total;
-                let dd_border = pill_borders.get(pill_idx).copied()
+                let dd_border = pill_borders
+                    .get(pill_idx)
+                    .copied()
                     .unwrap_or([0.345, 0.357, 0.439, 0.7]);
                 rects.push(
                     RectInstance::filled(px, dd_y_start, dd_w, dd_h_total, self.theme.bg)
@@ -1230,7 +1352,10 @@ impl Renderer {
                     let iy = dd_y_start + i as f32 * item_h;
                     let is_hovered = hovered.map(|h| h == i).unwrap_or(false);
                     let item_bg = if is_hovered {
-                        pill_bgs.get(pill_idx).copied().unwrap_or(self.theme.surface)
+                        pill_bgs
+                            .get(pill_idx)
+                            .copied()
+                            .unwrap_or(self.theme.surface)
                     } else {
                         [self.theme.bg[0], self.theme.bg[1], self.theme.bg[2], 0.0]
                     };
@@ -1251,7 +1376,12 @@ impl Renderer {
                 let n = cmds.len().min(8);
                 let pal_h = n as f32 * item_h;
                 let pal_y = bar_y - pal_h - 4.0 * sc;
-                let border_col = [self.theme.border[0], self.theme.border[1], self.theme.border[2], 0.8];
+                let border_col = [
+                    self.theme.border[0],
+                    self.theme.border[1],
+                    self.theme.border[2],
+                    0.8,
+                ];
                 rects.push(
                     RectInstance::filled(pal_x, pal_y, pal_w, pal_h, self.theme.surface_alt)
                         .with_radius(6.0)
@@ -1260,7 +1390,13 @@ impl Renderer {
                 for i in 0..n {
                     let iy = pal_y + i as f32 * item_h;
                     if self.cmd_palette_hovered == Some(i) {
-                        rects.push(RectInstance::filled(pal_x, iy, pal_w, item_h, self.theme.surface));
+                        rects.push(RectInstance::filled(
+                            pal_x,
+                            iy,
+                            pal_w,
+                            item_h,
+                            self.theme.surface,
+                        ));
                     }
                     new_palette_rects.push([pal_x, iy, pal_w, item_h]);
                 }
@@ -1281,8 +1417,19 @@ impl Renderer {
             if ch > 0.0 {
                 let ul_y = cy + ch - ul_h;
                 let sky = self.theme.sky;
-                let ul_col = [sky[0] as f32 / 255.0, sky[1] as f32 / 255.0, sky[2] as f32 / 255.0, 1.0];
-                rects.push(RectInstance::filled(cx, ul_y, pre_w.max(ul_h), ul_h, ul_col));
+                let ul_col = [
+                    sky[0] as f32 / 255.0,
+                    sky[1] as f32 / 255.0,
+                    sky[2] as f32 / 255.0,
+                    1.0,
+                ];
+                rects.push(RectInstance::filled(
+                    cx,
+                    ul_y,
+                    pre_w.max(ul_h),
+                    ul_h,
+                    ul_col,
+                ));
             }
         }
     }
@@ -1300,19 +1447,29 @@ impl Renderer {
 
         for (row_idx, row) in self.tui_cells.iter().enumerate() {
             let row_y = (pad + row_idx as f32 * cell_h).floor();
-            if row_y >= bar_y { break; }
+            if row_y >= bar_y {
+                break;
+            }
             // Size the rect to exactly the gap to the next row's snapped y — plus 1px
             // overlap — so bg rects tile without sub-pixel black seams.
             let next_y = (pad + (row_idx + 1) as f32 * cell_h).floor();
             let rect_h = (next_y - row_y).max(1.0) + 1.0;
-            if row.is_empty() { continue; }
+            if row.is_empty() {
+                continue;
+            }
             for (col_idx, cell) in row.iter().enumerate() {
                 let col_x = (pad + col_idx as f32 * cell_w).floor();
                 let next_x = (pad + (col_idx + 1) as f32 * cell_w).floor();
                 let rect_w = (next_x - col_x).max(1.0) + 1.0;
                 // 1) Bg rect (covers whole cell).
                 if let Some(bg) = cell.bg {
-                    rects.push(RectInstance::filled(col_x, row_y, rect_w, rect_h, [bg[0], bg[1], bg[2], 1.0]));
+                    rects.push(RectInstance::filled(
+                        col_x,
+                        row_y,
+                        rect_w,
+                        rect_h,
+                        [bg[0], bg[1], bg[2], 1.0],
+                    ));
                 }
                 // 2) Block / quadrant / shade / circle chars: paint fg as
                 // geometric sub-rects so pixel-art (claude avatar, progress
@@ -1323,9 +1480,15 @@ impl Renderer {
                     let ul_h = (1.0 * self.scale_factor).max(1.0);
                     let ul_y = row_y + rect_h - ul_h;
                     let bl = self.theme.blue;
-                    let col = [bl[0] as f32 / 255.0, bl[1] as f32 / 255.0, bl[2] as f32 / 255.0, 1.0];
+                    let col = [
+                        bl[0] as f32 / 255.0,
+                        bl[1] as f32 / 255.0,
+                        bl[2] as f32 / 255.0,
+                        1.0,
+                    ];
                     rects.push(RectInstance::filled(col_x, ul_y, rect_w, ul_h, col));
-                    self.link_rects.push(([col_x, row_y, rect_w, rect_h], url.as_ref().clone()));
+                    self.link_rects
+                        .push(([col_x, row_y, rect_w, rect_h], url.as_ref().clone()));
                 }
                 // Underline / strikethrough decorations. Use cell.fg as the
                 // line color — these are ANSI SGR attributes the app set.
@@ -1334,7 +1497,18 @@ impl Renderer {
                     let dim_col = [cell.fg[0], cell.fg[1], cell.fg[2], 0.5];
                     let dash_col = [cell.fg[0], cell.fg[1], cell.fg[2], 0.75];
                     let px = (self.scale_factor).max(1.0);
-                    draw_underline(rects, col_x, row_y, rect_w, rect_h, px, cell.underline, line_col, dim_col, dash_col);
+                    draw_underline(
+                        rects,
+                        col_x,
+                        row_y,
+                        rect_w,
+                        rect_h,
+                        px,
+                        cell.underline,
+                        line_col,
+                        dim_col,
+                        dash_col,
+                    );
                     if cell.strikethrough {
                         let s_y = (row_y + rect_h * 0.5).floor();
                         rects.push(RectInstance::filled(col_x, s_y, rect_w, px, line_col));
@@ -1388,16 +1562,34 @@ impl Renderer {
                 1 => {
                     // Beam: 2 logical-px wide bar at left edge of cell.
                     let beam_w = (2.0 * self.scale_factor).max(2.0);
-                    rects.push(RectInstance::filled(cx, cy, beam_w, cell_h.ceil(), cursor_color));
+                    rects.push(RectInstance::filled(
+                        cx,
+                        cy,
+                        beam_w,
+                        cell_h.ceil(),
+                        cursor_color,
+                    ));
                 }
                 2 => {
                     // Underline: thin bar at bottom of cell.
                     let ul_h = (2.0 * self.scale_factor).max(2.0);
-                    rects.push(RectInstance::filled(cx, cy + cell_h.ceil() - ul_h, cell_w.ceil(), ul_h, cursor_color));
+                    rects.push(RectInstance::filled(
+                        cx,
+                        cy + cell_h.ceil() - ul_h,
+                        cell_w.ceil(),
+                        ul_h,
+                        cursor_color,
+                    ));
                 }
                 _ => {
                     // Block (default).
-                    rects.push(RectInstance::filled(cx, cy, cell_w.ceil(), cell_h.ceil(), cursor_color));
+                    rects.push(RectInstance::filled(
+                        cx,
+                        cy,
+                        cell_w.ceil(),
+                        cell_h.ceil(),
+                        cursor_color,
+                    ));
                 }
             }
         }
@@ -1414,10 +1606,14 @@ impl Renderer {
 
         let cells = self.tui_cells.clone();
         for (row_idx, row) in cells.iter().enumerate() {
-            if row.is_empty() { continue; }
+            if row.is_empty() {
+                continue;
+            }
             // Match the snapped y from layout_tui so text sits exactly on its bg rect.
             let y = (pad + row_idx as f32 * cell_h).floor();
-            if y >= bar_y { break; }
+            if y >= bar_y {
+                break;
+            }
 
             // Per-run rendering: each color run is positioned at its exact column pixel
             // with a fixed width, so advance-width mismatches for special chars (box-drawing,
@@ -1464,11 +1660,21 @@ impl Renderer {
                 } else {
                     phys_font * 1.6
                 };
-                let inner_gap = if is_agent || is_plain_text { phys_font * 0.6 } else { phys_font * 0.4 };
+                let inner_gap = if is_agent || is_plain_text {
+                    phys_font * 0.6
+                } else {
+                    phys_font * 0.4
+                };
                 let hdr_pad = 10.0 * sc;
                 let content_pad = 8.0 * sc;
 
-                if let BlockContent::ShellCommand { input, cwd, duration_ms, .. } = &block.content {
+                if let BlockContent::ShellCommand {
+                    input,
+                    cwd,
+                    duration_ms,
+                    ..
+                } = &block.content
+                {
                     // Meta row: full ~-abbreviated cwd + execution time, above the command.
                     let meta_font = phys_font * 0.88;
                     let meta_line_h = meta_font * 1.4;
@@ -1486,14 +1692,34 @@ impl Renderer {
                         None => dir_display,
                     };
                     let meta_color = gc(self.theme.subtext);
-                    let meta_buf = self.make_buffer(&meta_text, content_w - hdr_pad * 2.0, meta_font, meta_color);
-                    results.push((meta_buf, x + hdr_pad, meta_y, content_w - hdr_pad * 2.0, meta_line_h, meta_color));
+                    let meta_buf = self.make_buffer(
+                        &meta_text,
+                        content_w - hdr_pad * 2.0,
+                        meta_font,
+                        meta_color,
+                    );
+                    results.push((
+                        meta_buf,
+                        x + hdr_pad,
+                        meta_y,
+                        content_w - hdr_pad * 2.0,
+                        meta_line_h,
+                        meta_color,
+                    ));
 
                     // Command row (normal font): the shell command itself.
                     let cmd_text_y = meta_y + meta_line_h + 3.0 * sc;
                     let cmd_color = gc(self.theme.text);
-                    let cmd_buf = self.make_buffer(input, content_w - hdr_pad * 2.0, phys_font, cmd_color);
-                    results.push((cmd_buf, x + hdr_pad, cmd_text_y, content_w - hdr_pad * 2.0, phys_font * 1.4, cmd_color));
+                    let cmd_buf =
+                        self.make_buffer(input, content_w - hdr_pad * 2.0, phys_font, cmd_color);
+                    results.push((
+                        cmd_buf,
+                        x + hdr_pad,
+                        cmd_text_y,
+                        content_w - hdr_pad * 2.0,
+                        phys_font * 1.4,
+                        cmd_color,
+                    ));
                 } else if !is_agent && !is_plain_text {
                     // Non-shell, non-agent, non-text blocks: single centered header line.
                     let raw_label = block_header_label(block);
@@ -1501,16 +1727,20 @@ impl Renderer {
                     let has_tool_output = matches!(&block.content,
                         BlockContent::ToolCall { output, .. } if output.is_some());
                     let header_label = if has_tool_output {
-                        let chevron = if self.is_collapsed(block) { "▶ " } else { "▼ " };
+                        let chevron = if self.is_collapsed(block) {
+                            "▶ "
+                        } else {
+                            "▼ "
+                        };
                         format!("{}{}", chevron, raw_label)
                     } else {
                         raw_label
                     };
                     let header_color = match block.kind {
-                        BlockKind::Agent    => gc(self.theme.blue),
+                        BlockKind::Agent => gc(self.theme.blue),
                         BlockKind::Approval => gc(self.theme.yellow),
-                        BlockKind::Tool     => gc(self.theme.teal),
-                        _                   => gc(self.theme.subtext),
+                        BlockKind::Tool => gc(self.theme.teal),
+                        _ => gc(self.theme.subtext),
                     };
                     let header_buf = self.make_buffer(
                         &header_label,
@@ -1519,7 +1749,14 @@ impl Renderer {
                         header_color,
                     );
                     let hdr_text_y = sy + (cmd_bar_h - phys_font * 1.4) * 0.5;
-                    results.push((header_buf, x + hdr_pad, hdr_text_y, content_w - hdr_pad * 2.0, phys_font * 1.4, header_color));
+                    results.push((
+                        header_buf,
+                        x + hdr_pad,
+                        hdr_text_y,
+                        content_w - hdr_pad * 2.0,
+                        phys_font * 1.4,
+                        header_color,
+                    ));
                 }
 
                 // Output area starts below the cmd bar + gap.
@@ -1531,9 +1768,13 @@ impl Renderer {
                     let (cell_w, cell_h) = self.terminal_cell_size();
                     let tui_cells = self.tui_cells.clone();
                     for (row_idx, row) in tui_cells.iter().enumerate() {
-                        if row.is_empty() { continue; }
+                        if row.is_empty() {
+                            continue;
+                        }
                         let ry = (output_top + row_idx as f32 * cell_h).floor();
-                        if ry > sy + h { break; }
+                        if ry > sy + h {
+                            break;
+                        }
                         let runs = self.make_tui_row_runs(&row, cell_w, phys_font);
                         for (buf, rx, w, color) in runs {
                             results.push((buf, x + output_pad_x + rx, ry, w, cell_h, color));
@@ -1548,120 +1789,197 @@ impl Renderer {
                             let base_y = output_top + 2.0 * sc;
                             for (row_idx, row) in output.rows.iter().enumerate() {
                                 let row_y = (base_y + row_idx as f32 * cell_h).floor();
-                                if row_y > sy + h { break; }
+                                if row_y > sy + h {
+                                    break;
+                                }
                                 let any_visible = row.cells.iter().any(|c| {
                                     let fc = c.grapheme.chars().next().unwrap_or('\0');
                                     fc != ' ' && fc != '\0'
                                 });
-                                if !any_visible { continue; }
-                                let tui_row: Vec<TuiCell> = row.cells.iter().map(|c| TuiCell {
-                                    grapheme: c.grapheme.clone(),
-                                    fg: c.fg.map(|col| [col.r as f32 / 255.0, col.g as f32 / 255.0, col.b as f32 / 255.0])
-                                           .unwrap_or([0.804, 0.835, 0.918]),
-                                    bg: c.bg.map(|col| [col.r as f32 / 255.0, col.g as f32 / 255.0, col.b as f32 / 255.0]),
-                                    bold: c.bold,
-                                    italic: c.italic,
-                                    underline: c.underline,
-                                    strikethrough: c.strikethrough,
-                                    link: None,
-                                }).collect();
+                                if !any_visible {
+                                    continue;
+                                }
+                                let tui_row: Vec<TuiCell> = row
+                                    .cells
+                                    .iter()
+                                    .map(|c| TuiCell {
+                                        grapheme: c.grapheme.clone(),
+                                        fg: c
+                                            .fg
+                                            .map(|col| {
+                                                [
+                                                    col.r as f32 / 255.0,
+                                                    col.g as f32 / 255.0,
+                                                    col.b as f32 / 255.0,
+                                                ]
+                                            })
+                                            .unwrap_or([0.804, 0.835, 0.918]),
+                                        bg: c.bg.map(|col| {
+                                            [
+                                                col.r as f32 / 255.0,
+                                                col.g as f32 / 255.0,
+                                                col.b as f32 / 255.0,
+                                            ]
+                                        }),
+                                        bold: c.bold,
+                                        italic: c.italic,
+                                        underline: c.underline,
+                                        strikethrough: c.strikethrough,
+                                        link: None,
+                                    })
+                                    .collect();
                                 let runs = self.make_tui_row_runs(&tui_row, cell_w, phys_font);
                                 for (buf, rx, w, color) in runs {
                                     results.push((buf, content_x + rx, row_y, w, cell_h, color));
                                 }
                             }
                         }
-                        _ => if !self.is_collapsed(block) {
-                            let content_text = block_content_text(block);
-                            let hdr_h = cmd_bar_h;
-                            let content_h = h - hdr_h - content_pad;
-                            let buf_w = content_w - content_pad * 2.0;
-                            let text_y = sy + hdr_h + 4.0 * sc;
+                        _ => {
+                            if !self.is_collapsed(block) {
+                                let content_text = block_content_text(block);
+                                let hdr_h = cmd_bar_h;
+                                let content_h = h - hdr_h - content_pad;
+                                let buf_w = content_w - content_pad * 2.0;
+                                let text_y = sy + hdr_h + 4.0 * sc;
 
-                            // Spinner for streaming agent blocks.
-                            let is_running_agent = is_agent
-                                && matches!(block.status, BlockStatus::Running);
-                            let running_tool = block.agent_id.as_ref()
-                                .and_then(|id| self.agent_running_tool.get(id))
-                                .cloned();
-                            const FRAMES: [&str; 10] = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
-                            let spin_color = gc(self.theme.blue);
-                            if is_running_agent && content_text.is_empty() {
-                                // No text yet — centred spinner (or "tool_name..." label).
-                                let frame = FRAMES[self.spinner_frame as usize];
-                                let label = if let Some(ref tname) = running_tool {
-                                    format!("{} {}…", frame, tname)
-                                } else {
-                                    frame.to_string()
-                                };
-                                let spin_buf = self.make_buffer(&label, buf_w, phys_font, spin_color);
-                                let spin_h = phys_font * 1.4;
-                                let spin_x = x + content_pad;
-                                let spin_y = sy + (h - spin_h) * 0.5;
-                                results.push((spin_buf, spin_x, spin_y, buf_w, spin_h, spin_color));
-                            } else if is_running_agent && running_tool.is_some() {
-                                // Content already rendered + tool is executing — show
-                                // a compact tool indicator at the bottom of the block.
-                                let frame = FRAMES[self.spinner_frame as usize];
-                                let tname = running_tool.unwrap();
-                                let label = format!("{} {}…", frame, tname);
-                                let spin_buf = self.make_buffer(&label, buf_w, phys_font * 0.9, spin_color);
-                                let spin_h = phys_font * 1.3;
-                                let spin_x = x + content_pad;
-                                // Anchor just above the block bottom edge.
-                                let spin_y = sy + h - spin_h - 4.0 * sc;
-                                results.push((spin_buf, spin_x, spin_y, buf_w, spin_h, spin_color));
-                            }
-
-                            if !content_text.is_empty() {
-                                let is_user_msg = matches!(&block.content,
-                                    BlockContent::AgentMessage { role: beyonder_core::MessageRole::User, .. });
-                                let fallback_color = gc(self.theme.text);
-                                // Cache key: (content_len, buf_w bits, phys_font bits, viewport_h bits).
-                                let content_len = content_text.len() as u64;
-                                let bw_bits = buf_w.to_bits();
-                                let pf_bits = phys_font.to_bits();
-                                let vh_bits = self.viewport.height.to_bits();
-                                if is_agent && !is_user_msg {
-                                    // Try to reuse a previously shaped markdown buffer.
-                                    let cached = self.glyph_buf_cache.remove(&block.id);
-                                    let (buf, skipped, cache_len) = match cached {
-                                        Some((len, bw, pf, vh, b))
-                                            if len == content_len
-                                               && bw == bw_bits && pf == pf_bits && vh == vh_bits =>
-                                        {
-                                            // Content unchanged — reuse shaped buffer as-is.
-                                            let line_h = phys_font * 1.4;
-                                            let max_vis = ((self.viewport.height / line_h).ceil() as usize + 30).max(50);
-                                            let total = content_text.lines().count();
-                                            (b, total.saturating_sub(max_vis), len)
-                                        }
-                                        _ => {
-                                            let (b, s) = self.make_markdown_buffer(&content_text, buf_w, phys_font);
-                                            (b, s, content_len)
-                                        }
-                                    };
-                                    // Offset text_y down by the skipped lines so the
-                                    // visible tail renders at the correct screen position.
-                                    let line_h = phys_font * 1.4;
-                                    let adjusted_text_y = text_y + skipped as f32 * line_h;
-                                    results.push_cached(
-                                        (buf, x + content_pad, adjusted_text_y, buf_w, content_h.max(1.0), fallback_color),
-                                        (block.id.clone(), cache_len, bw_bits, pf_bits, vh_bits),
-                                    );
-                                } else {
-                                    let content_buf = if is_user_msg {
-                                        let col = gc(self.theme.subtext);
-                                        self.make_buffer(&content_text, buf_w, phys_font, col)
+                                // Spinner for streaming agent blocks.
+                                let is_running_agent =
+                                    is_agent && matches!(block.status, BlockStatus::Running);
+                                let running_tool = block
+                                    .agent_id
+                                    .as_ref()
+                                    .and_then(|id| self.agent_running_tool.get(id))
+                                    .cloned();
+                                const FRAMES: [&str; 10] =
+                                    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                                let spin_color = gc(self.theme.blue);
+                                if is_running_agent && content_text.is_empty() {
+                                    // No text yet — centred spinner (or "tool_name..." label).
+                                    let frame = FRAMES[self.spinner_frame as usize];
+                                    let label = if let Some(ref tname) = running_tool {
+                                        format!("{} {}…", frame, tname)
                                     } else {
-                                        let text_color = match block.kind {
-                                            BlockKind::Approval => gc(self.theme.peach),
-                                            BlockKind::Tool     => gc(self.theme.sky),
-                                            _                   => gc(self.theme.text),
-                                        };
-                                        self.make_buffer(&content_text, buf_w, phys_font, text_color)
+                                        frame.to_string()
                                     };
-                                    results.push((content_buf, x + content_pad, text_y, buf_w, content_h.max(1.0), fallback_color));
+                                    let spin_buf =
+                                        self.make_buffer(&label, buf_w, phys_font, spin_color);
+                                    let spin_h = phys_font * 1.4;
+                                    let spin_x = x + content_pad;
+                                    let spin_y = sy + (h - spin_h) * 0.5;
+                                    results.push((
+                                        spin_buf, spin_x, spin_y, buf_w, spin_h, spin_color,
+                                    ));
+                                } else if is_running_agent && running_tool.is_some() {
+                                    // Content already rendered + tool is executing — show
+                                    // a compact tool indicator at the bottom of the block.
+                                    let frame = FRAMES[self.spinner_frame as usize];
+                                    let tname = running_tool.unwrap();
+                                    let label = format!("{} {}…", frame, tname);
+                                    let spin_buf = self.make_buffer(
+                                        &label,
+                                        buf_w,
+                                        phys_font * 0.9,
+                                        spin_color,
+                                    );
+                                    let spin_h = phys_font * 1.3;
+                                    let spin_x = x + content_pad;
+                                    // Anchor just above the block bottom edge.
+                                    let spin_y = sy + h - spin_h - 4.0 * sc;
+                                    results.push((
+                                        spin_buf, spin_x, spin_y, buf_w, spin_h, spin_color,
+                                    ));
+                                }
+
+                                if !content_text.is_empty() {
+                                    let is_user_msg = matches!(
+                                        &block.content,
+                                        BlockContent::AgentMessage {
+                                            role: beyonder_core::MessageRole::User,
+                                            ..
+                                        }
+                                    );
+                                    let fallback_color = gc(self.theme.text);
+                                    // Cache key: (content_len, buf_w bits, phys_font bits, viewport_h bits).
+                                    let content_len = content_text.len() as u64;
+                                    let bw_bits = buf_w.to_bits();
+                                    let pf_bits = phys_font.to_bits();
+                                    let vh_bits = self.viewport.height.to_bits();
+                                    if is_agent && !is_user_msg {
+                                        // Try to reuse a previously shaped markdown buffer.
+                                        let cached = self.glyph_buf_cache.remove(&block.id);
+                                        let (buf, skipped, cache_len) = match cached {
+                                            Some((len, bw, pf, vh, b))
+                                                if len == content_len
+                                                    && bw == bw_bits
+                                                    && pf == pf_bits
+                                                    && vh == vh_bits =>
+                                            {
+                                                // Content unchanged — reuse shaped buffer as-is.
+                                                let line_h = phys_font * 1.4;
+                                                let max_vis = ((self.viewport.height / line_h)
+                                                    .ceil()
+                                                    as usize
+                                                    + 30)
+                                                    .max(50);
+                                                let total = content_text.lines().count();
+                                                (b, total.saturating_sub(max_vis), len)
+                                            }
+                                            _ => {
+                                                let (b, s) = self.make_markdown_buffer(
+                                                    &content_text,
+                                                    buf_w,
+                                                    phys_font,
+                                                );
+                                                (b, s, content_len)
+                                            }
+                                        };
+                                        // Offset text_y down by the skipped lines so the
+                                        // visible tail renders at the correct screen position.
+                                        let line_h = phys_font * 1.4;
+                                        let adjusted_text_y = text_y + skipped as f32 * line_h;
+                                        results.push_cached(
+                                            (
+                                                buf,
+                                                x + content_pad,
+                                                adjusted_text_y,
+                                                buf_w,
+                                                content_h.max(1.0),
+                                                fallback_color,
+                                            ),
+                                            (
+                                                block.id.clone(),
+                                                cache_len,
+                                                bw_bits,
+                                                pf_bits,
+                                                vh_bits,
+                                            ),
+                                        );
+                                    } else {
+                                        let content_buf = if is_user_msg {
+                                            let col = gc(self.theme.subtext);
+                                            self.make_buffer(&content_text, buf_w, phys_font, col)
+                                        } else {
+                                            let text_color = match block.kind {
+                                                BlockKind::Approval => gc(self.theme.peach),
+                                                BlockKind::Tool => gc(self.theme.sky),
+                                                _ => gc(self.theme.text),
+                                            };
+                                            self.make_buffer(
+                                                &content_text,
+                                                buf_w,
+                                                phys_font,
+                                                text_color,
+                                            )
+                                        };
+                                        results.push((
+                                            content_buf,
+                                            x + content_pad,
+                                            text_y,
+                                            buf_w,
+                                            content_h.max(1.0),
+                                            fallback_color,
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1754,7 +2072,9 @@ impl Renderer {
 
             let phys_font_local = self.font_size * sc;
             let line_h_local = phys_font_local * 1.4;
-            let visible_lines = self.measure_input_lines(text_w, phys_font_local).0
+            let visible_lines = self
+                .measure_input_lines(text_w, phys_font_local)
+                .0
                 .min(MAX_INPUT_LINES);
             let text_area_h = visible_lines as f32 * line_h_local;
 
@@ -1798,7 +2118,10 @@ impl Renderer {
                 ?run_tops,
                 "bar text layout"
             );
-            results.push_clipped((buf, text_x, text_block_y, text_w, text_area_h, col), (clip_top, clip_bottom));
+            results.push_clipped(
+                (buf, text_x, text_block_y, text_w, text_area_h, col),
+                (clip_top, clip_bottom),
+            );
 
             // Approximate caret rect (for IME candidate positioning). Uses the
             // monospace char_w since the input font is JetBrains Mono Nerd Font.
@@ -1831,10 +2154,20 @@ impl Renderer {
             let icon = pill_icons.get(i).copied().unwrap_or(' ');
             let full_label = format!("{} {}", icon, label);
             let pill_w = full_label.chars().count() as f32 * pill_char_w + 2.0 * pill_hpad;
-            let color = pill_text_colors.get(i).copied()
+            let color = pill_text_colors
+                .get(i)
+                .copied()
                 .unwrap_or(gc(self.theme.subtext));
-            let pill_buf = self.make_pill_buffer(&full_label, pill_w - 2.0 * pill_hpad, pill_font_size, color);
-            results.push((pill_buf, pill_x + pill_hpad, pill_text_y, pill_w - 2.0 * pill_hpad, pill_line_h, color));
+            let pill_buf =
+                self.make_pill_buffer(&full_label, pill_w - 2.0 * pill_hpad, pill_font_size, color);
+            results.push((
+                pill_buf,
+                pill_x + pill_hpad,
+                pill_text_y,
+                pill_w - 2.0 * pill_hpad,
+                pill_line_h,
+                color,
+            ));
             pill_x += pill_w + pill_gap;
         }
 
@@ -1851,8 +2184,20 @@ impl Renderer {
             let model_line_h = model_font * 1.4;
             let model_ty = pill_top + (pill_h - model_line_h) * 0.5;
             let model_color = gc(self.theme.mauve);
-            let model_buf = self.make_pill_buffer(&model_label, model_w - 2.0 * pill_hpad, model_font, model_color);
-            results.push((model_buf, model_x + pill_hpad, model_ty, model_w - 2.0 * pill_hpad, model_line_h, model_color));
+            let model_buf = self.make_pill_buffer(
+                &model_label,
+                model_w - 2.0 * pill_hpad,
+                model_font,
+                model_color,
+            );
+            results.push((
+                model_buf,
+                model_x + pill_hpad,
+                model_ty,
+                model_w - 2.0 * pill_hpad,
+                model_line_h,
+                model_color,
+            ));
         }
 
         // Mode switcher text.
@@ -1865,12 +2210,20 @@ impl Renderer {
                 let mode_color = match self.mode_label.as_str() {
                     "shell" => gc(self.theme.blue),
                     "agent" => gc(self.theme.mauve),
-                    _       => gc(self.theme.muted),
+                    _ => gc(self.theme.muted),
                 };
                 let hpad = 12.0 * sc;
-                let mode_buf = self.make_pill_buffer(&mode_text, mode_w - 2.0 * hpad, mode_font, mode_color);
+                let mode_buf =
+                    self.make_pill_buffer(&mode_text, mode_w - 2.0 * hpad, mode_font, mode_color);
                 let ty = mode_y + (mode_h - mode_line_h) * 0.5;
-                results.push((mode_buf, mode_x + hpad, ty, mode_w - 2.0 * hpad, mode_line_h, mode_color));
+                results.push((
+                    mode_buf,
+                    mode_x + hpad,
+                    ty,
+                    mode_w - 2.0 * hpad,
+                    mode_line_h,
+                    mode_color,
+                ));
             }
         }
 
@@ -1887,12 +2240,22 @@ impl Renderer {
                     gc(self.theme.green),
                     gc(self.theme.lavender),
                 ];
-                let dd_text_color = dd_text_colors.get(pill_idx).copied()
+                let dd_text_color = dd_text_colors
+                    .get(pill_idx)
+                    .copied()
                     .unwrap_or(gc(self.theme.text));
                 for (i, item) in items.iter().enumerate() {
                     let iy = dd_y_start + i as f32 * item_h + item_v_pad;
-                    let item_buf = self.make_buffer(item, dd_w - pill_hpad * 2.0, phys_font, dd_text_color);
-                    results.push((item_buf, px + pill_hpad, iy, dd_w - pill_hpad * 2.0, item_h, dd_text_color));
+                    let item_buf =
+                        self.make_buffer(item, dd_w - pill_hpad * 2.0, phys_font, dd_text_color);
+                    results.push((
+                        item_buf,
+                        px + pill_hpad,
+                        iy,
+                        dd_w - pill_hpad * 2.0,
+                        item_h,
+                        dd_text_color,
+                    ));
                 }
             }
         }
@@ -1906,8 +2269,8 @@ impl Renderer {
                 let pal_x = 14.0 * sc;
                 let pal_y = bar_y - n as f32 * item_h - 4.0 * sc;
                 let usage_col = gc(self.theme.lavender);
-                let desc_col  = gc(self.theme.muted);
-                let pal_font  = phys_font * 0.88;
+                let desc_col = gc(self.theme.muted);
+                let pal_font = phys_font * 0.88;
                 let pal_line_h = pal_font * 1.4;
                 let v_pad = (item_h - pal_line_h) * 0.5;
                 let h_pad = 10.0 * sc;
@@ -1938,10 +2301,22 @@ impl Renderer {
         let sc = self.scale_factor;
         let win_w = self.surface_config.width as f32;
         // Strip background (Catppuccin Mantle).
-        rects.push(RectInstance::filled(0.0, 0.0, win_w, tab_h, self.theme.surface_alt));
+        rects.push(RectInstance::filled(
+            0.0,
+            0.0,
+            win_w,
+            tab_h,
+            self.theme.surface_alt,
+        ));
         // Bottom separator.
         let b = self.theme.border;
-        rects.push(RectInstance::filled(0.0, tab_h - sc.ceil(), win_w, sc.ceil(), [b[0], b[1], b[2], 0.6]));
+        rects.push(RectInstance::filled(
+            0.0,
+            tab_h - sc.ceil(),
+            win_w,
+            sc.ceil(),
+            [b[0], b[1], b[2], 0.6],
+        ));
 
         let pad_x = 8.0 * sc;
         let gap = 4.0 * sc;
@@ -1961,7 +2336,15 @@ impl Renderer {
             let b = self.theme.border;
             let bl = self.theme.blue;
             let (bg, border) = if is_active {
-                (self.theme.surface, [bl[0] as f32/255.0, bl[1] as f32/255.0, bl[2] as f32/255.0, 0.9_f32])
+                (
+                    self.theme.surface,
+                    [
+                        bl[0] as f32 / 255.0,
+                        bl[1] as f32 / 255.0,
+                        bl[2] as f32 / 255.0,
+                        0.9_f32,
+                    ],
+                )
             } else {
                 (self.theme.bg, [b[0], b[1], b[2], 0.5_f32])
             };
@@ -1990,14 +2373,17 @@ impl Renderer {
         let rects = self.tab_rects.clone();
         let inner_pad = 12.0 * sc;
         for (i, label) in labels.iter().enumerate() {
-            let Some(&[rx, ry, rw, rh]) = rects.get(i) else { continue };
+            let Some(&[rx, ry, rw, rh]) = rects.get(i) else {
+                continue;
+            };
             let color = if i == active {
                 gc(self.theme.text)
             } else {
                 gc(self.theme.muted)
             };
             let ty = ry + (rh - line_h) * 0.5;
-            let buf = self.make_pill_buffer(label, (rw - inner_pad * 2.0).max(1.0), phys_font, color);
+            let buf =
+                self.make_pill_buffer(label, (rw - inner_pad * 2.0).max(1.0), phys_font, color);
             results.push((buf, rx + inner_pad, ty, rw - inner_pad * 2.0, line_h, color));
         }
     }
@@ -2015,7 +2401,9 @@ impl Renderer {
         buf.set_text(
             &mut self.font_system,
             text,
-            Attrs::new().family(Family::Name("JetBrainsMono Nerd Font")).color(color),
+            Attrs::new()
+                .family(Family::Name("JetBrainsMono Nerd Font"))
+                .color(color),
             Shaping::Advanced,
         );
         buf.shape_until_scroll(&mut self.font_system, false);
@@ -2036,7 +2424,9 @@ impl Renderer {
         buf.set_text(
             &mut self.font_system,
             text,
-            Attrs::new().family(Family::Name("JetBrainsMono Nerd Font")).color(color),
+            Attrs::new()
+                .family(Family::Name("JetBrainsMono Nerd Font"))
+                .color(color),
             Shaping::Advanced,
         );
         buf.shape_until_scroll(&mut self.font_system, false);
@@ -2047,7 +2437,12 @@ impl Renderer {
     /// Handles headings, **bold**, `inline code`, fenced code blocks, and list items.
     /// Returns `(buffer, skipped_lines)` — only the last `max_vis_lines` lines of
     /// `text` are shaped so reshape cost is O(viewport) not O(total_response).
-    fn make_markdown_buffer(&mut self, text: &str, max_width: f32, size: f32) -> (GlyphBuffer, usize) {
+    fn make_markdown_buffer(
+        &mut self,
+        text: &str,
+        max_width: f32,
+        size: f32,
+    ) -> (GlyphBuffer, usize) {
         use glyphon::Weight;
 
         let line_h = size * 1.4;
@@ -2065,11 +2460,11 @@ impl Renderer {
         };
         let text = visible_text.as_ref();
 
-        let base_color   = gc(self.theme.text);
-        let heading_color= gc(self.theme.lavender);
-        let code_color   = gc(self.theme.sky);
-        let bold_color   = GlyphColor::rgb(255, 255, 255);
-        let fence_color  = gc(self.theme.green);
+        let base_color = gc(self.theme.text);
+        let heading_color = gc(self.theme.lavender);
+        let code_color = gc(self.theme.sky);
+        let bold_color = GlyphColor::rgb(255, 255, 255);
+        let fence_color = gc(self.theme.green);
 
         let metrics = Metrics::new(size, size * 1.4);
         let mut buf = GlyphBuffer::new(&mut self.font_system, metrics);
@@ -2119,7 +2514,9 @@ impl Renderer {
             };
 
             // Inline spans: **bold** and `code`.
-            parse_inline(line_pfx, parse_line, base_color, bold_color, code_color, &mut spans);
+            parse_inline(
+                line_pfx, parse_line, base_color, bold_color, code_color, &mut spans,
+            );
         }
 
         // Convert to rich-text spans for glyphon.
@@ -2150,7 +2547,14 @@ impl Renderer {
     /// Build a single-color GlyphBuffer for a run of characters.
     /// No width constraint — wide/Nerd Font chars would wrap and disappear with a fixed width.
     /// The caller positions the buffer at the correct column and TextBounds clips at the run boundary.
-    fn make_tui_run_buffer(&mut self, text: &str, color: GlyphColor, phys_font: f32, _width: f32, shaping: Shaping) -> GlyphBuffer {
+    fn make_tui_run_buffer(
+        &mut self,
+        text: &str,
+        color: GlyphColor,
+        phys_font: f32,
+        _width: f32,
+        shaping: Shaping,
+    ) -> GlyphBuffer {
         // Use exact (non-floored) line height so centering_offset = 0.
         // This places glyphs at the exact cell top — prevents 1px downward shift
         // that breaks tiling of box-drawing and block-element characters.
@@ -2173,7 +2577,12 @@ impl Renderer {
     /// Returns `(buf, x_offset, width, color)` for each non-whitespace run.
     /// Each run is positioned at `run_start_col * cell_w` and capped to `run_len * cell_w`,
     /// so special-char advance-width mismatch is contained within the run and never accumulates.
-    fn make_tui_row_runs(&mut self, cells: &[TuiCell], cell_w: f32, phys_font: f32) -> Vec<(GlyphBuffer, f32, f32, GlyphColor)> {
+    fn make_tui_row_runs(
+        &mut self,
+        cells: &[TuiCell],
+        cell_w: f32,
+        phys_font: f32,
+    ) -> Vec<(GlyphBuffer, f32, f32, GlyphColor)> {
         let mut result = Vec::new();
         let mut i = 0;
         while i < cells.len() {
@@ -2212,7 +2621,9 @@ impl Renderer {
                     text.push(fc);
                 }
             }
-            if text.trim().is_empty() { continue; }
+            if text.trim().is_empty() {
+                continue;
+            }
 
             let color = GlyphColor::rgb(
                 (run_fg[0] * 255.0) as u8,
@@ -2230,10 +2641,14 @@ impl Renderer {
             }
             let col_span = end_col - run_start;
             let w = (col_span as f32 * cell_w).ceil();
-            let needs_adv = run_cells.iter().any(|c| {
-                c.grapheme.chars().any(|ch| ch as u32 > 127)
-            });
-            let shaping = if needs_adv { Shaping::Advanced } else { Shaping::Basic };
+            let needs_adv = run_cells
+                .iter()
+                .any(|c| c.grapheme.chars().any(|ch| ch as u32 > 127));
+            let shaping = if needs_adv {
+                Shaping::Advanced
+            } else {
+                Shaping::Basic
+            };
             let buf = self.make_tui_run_buffer(&text, color, phys_font, w, shaping);
             result.push((buf, x, w, color));
         }
@@ -2286,13 +2701,31 @@ fn draw_underline(
 /// rounded rect with radius = min(w,h)/2 — used to approximate filled circles
 /// for claude's tool-execution indicators (`⏺ ● ○ ◐ ◑ ◒ ◓`).
 #[derive(Copy, Clone)]
-struct SubRect { x: f32, y: f32, w: f32, h: f32, rounded: bool }
+struct SubRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    rounded: bool,
+}
 
 const fn sr(x: f32, y: f32, w: f32, h: f32) -> SubRect {
-    SubRect { x, y, w, h, rounded: false }
+    SubRect {
+        x,
+        y,
+        w,
+        h,
+        rounded: false,
+    }
 }
 const fn sc(x: f32, y: f32, w: f32, h: f32) -> SubRect {
-    SubRect { x, y, w, h, rounded: true }
+    SubRect {
+        x,
+        y,
+        w,
+        h,
+        rounded: true,
+    }
 }
 
 /// Geometry for block / half-block / quadrant / shade / circle Unicode
@@ -2300,15 +2733,15 @@ const fn sc(x: f32, y: f32, w: f32, h: f32) -> SubRect {
 /// This guarantees pixel-perfect tiling for pixel-art avatars, progress bars,
 /// and compact colored indicators that the font's glyph might not render cleanly.
 fn block_char_geom(ch: char) -> Option<&'static [SubRect]> {
-    const FULL:   &[SubRect] = &[sr(0.0, 0.0, 1.0, 1.0)];
-    const UPPER:  &[SubRect] = &[sr(0.0, 0.0, 1.0, 0.5)];
-    const LOWER:  &[SubRect] = &[sr(0.0, 0.5, 1.0, 0.5)];
-    const LEFT:   &[SubRect] = &[sr(0.0, 0.0, 0.5, 1.0)];
-    const RIGHT:  &[SubRect] = &[sr(0.5, 0.0, 0.5, 1.0)];
-    const QUL:    &[SubRect] = &[sr(0.0, 0.0, 0.5, 0.5)];
-    const QUR:    &[SubRect] = &[sr(0.5, 0.0, 0.5, 0.5)];
-    const QLL:    &[SubRect] = &[sr(0.0, 0.5, 0.5, 0.5)];
-    const QLR:    &[SubRect] = &[sr(0.5, 0.5, 0.5, 0.5)];
+    const FULL: &[SubRect] = &[sr(0.0, 0.0, 1.0, 1.0)];
+    const UPPER: &[SubRect] = &[sr(0.0, 0.0, 1.0, 0.5)];
+    const LOWER: &[SubRect] = &[sr(0.0, 0.5, 1.0, 0.5)];
+    const LEFT: &[SubRect] = &[sr(0.0, 0.0, 0.5, 1.0)];
+    const RIGHT: &[SubRect] = &[sr(0.5, 0.0, 0.5, 1.0)];
+    const QUL: &[SubRect] = &[sr(0.0, 0.0, 0.5, 0.5)];
+    const QUR: &[SubRect] = &[sr(0.5, 0.0, 0.5, 0.5)];
+    const QLL: &[SubRect] = &[sr(0.0, 0.5, 0.5, 0.5)];
+    const QLR: &[SubRect] = &[sr(0.5, 0.5, 0.5, 0.5)];
     const Q_UL_LR: &[SubRect] = &[sr(0.0, 0.0, 0.5, 0.5), sr(0.5, 0.5, 0.5, 0.5)];
     const Q_UR_LL: &[SubRect] = &[sr(0.5, 0.0, 0.5, 0.5), sr(0.0, 0.5, 0.5, 0.5)];
     const Q_UL_LOWER: &[SubRect] = &[sr(0.0, 0.0, 0.5, 0.5), sr(0.0, 0.5, 1.0, 0.5)];
@@ -2316,44 +2749,60 @@ fn block_char_geom(ch: char) -> Option<&'static [SubRect]> {
     const Q_UPPER_LR: &[SubRect] = &[sr(0.0, 0.0, 1.0, 0.5), sr(0.5, 0.5, 0.5, 0.5)];
     const Q_UR_LOWER: &[SubRect] = &[sr(0.5, 0.0, 0.5, 0.5), sr(0.0, 0.5, 1.0, 0.5)];
     const E1: &[SubRect] = &[sr(0.0, 0.875, 1.0, 0.125)];
-    const E2: &[SubRect] = &[sr(0.0, 0.75,  1.0, 0.25)];
+    const E2: &[SubRect] = &[sr(0.0, 0.75, 1.0, 0.25)];
     const E3: &[SubRect] = &[sr(0.0, 0.625, 1.0, 0.375)];
     const E5: &[SubRect] = &[sr(0.0, 0.375, 1.0, 0.625)];
-    const E6: &[SubRect] = &[sr(0.0, 0.25,  1.0, 0.75)];
+    const E6: &[SubRect] = &[sr(0.0, 0.25, 1.0, 0.75)];
     const E7: &[SubRect] = &[sr(0.0, 0.125, 1.0, 0.875)];
     const V1: &[SubRect] = &[sr(0.0, 0.0, 0.125, 1.0)];
-    const V2: &[SubRect] = &[sr(0.0, 0.0, 0.25,  1.0)];
+    const V2: &[SubRect] = &[sr(0.0, 0.0, 0.25, 1.0)];
     const V3: &[SubRect] = &[sr(0.0, 0.0, 0.375, 1.0)];
     const V5: &[SubRect] = &[sr(0.0, 0.0, 0.625, 1.0)];
-    const V6: &[SubRect] = &[sr(0.0, 0.0, 0.75,  1.0)];
+    const V6: &[SubRect] = &[sr(0.0, 0.0, 0.75, 1.0)];
     const V7: &[SubRect] = &[sr(0.0, 0.0, 0.875, 1.0)];
     // Coords are fractions of the virtual disc bounding box (0..1). The
     // rounded-rect renderer re-anchors them to a cell-centered square whose
     // side == min(cell_w, cell_h) * 0.55 so dots stay round.
-    const DOT:     &[SubRect] = &[sc(0.0, 0.0, 1.0, 1.0)];
-    const DOT_L:   &[SubRect] = &[sc(0.0, 0.0, 0.5, 1.0)];
-    const DOT_R:   &[SubRect] = &[sc(0.5, 0.0, 0.5, 1.0)];
-    const DOT_U:   &[SubRect] = &[sc(0.0, 0.0, 1.0, 0.5)];
-    const DOT_D:   &[SubRect] = &[sc(0.0, 0.5, 1.0, 0.5)];
-    const EMPTY:   &[SubRect] = &[];
+    const DOT: &[SubRect] = &[sc(0.0, 0.0, 1.0, 1.0)];
+    const DOT_L: &[SubRect] = &[sc(0.0, 0.0, 0.5, 1.0)];
+    const DOT_R: &[SubRect] = &[sc(0.5, 0.0, 0.5, 1.0)];
+    const DOT_U: &[SubRect] = &[sc(0.0, 0.0, 1.0, 0.5)];
+    const DOT_D: &[SubRect] = &[sc(0.0, 0.5, 1.0, 0.5)];
+    const EMPTY: &[SubRect] = &[];
     match ch {
         '█' => Some(FULL),
-        '▀' => Some(UPPER), '▄' => Some(LOWER),
-        '▌' => Some(LEFT),  '▐' => Some(RIGHT),
-        '▘' => Some(QUL), '▝' => Some(QUR), '▖' => Some(QLL), '▗' => Some(QLR),
-        '▚' => Some(Q_UL_LR), '▞' => Some(Q_UR_LL),
-        '▙' => Some(Q_UL_LOWER), '▛' => Some(Q_UPPER_LL),
-        '▜' => Some(Q_UPPER_LR), '▟' => Some(Q_UR_LOWER),
-        '▁' => Some(E1), '▂' => Some(E2), '▃' => Some(E3),
-        '▅' => Some(E5), '▆' => Some(E6), '▇' => Some(E7),
-        '▏' => Some(V1), '▎' => Some(V2), '▍' => Some(V3),
-        '▋' => Some(V5), '▊' => Some(V6), '▉' => Some(V7),
+        '▀' => Some(UPPER),
+        '▄' => Some(LOWER),
+        '▌' => Some(LEFT),
+        '▐' => Some(RIGHT),
+        '▘' => Some(QUL),
+        '▝' => Some(QUR),
+        '▖' => Some(QLL),
+        '▗' => Some(QLR),
+        '▚' => Some(Q_UL_LR),
+        '▞' => Some(Q_UR_LL),
+        '▙' => Some(Q_UL_LOWER),
+        '▛' => Some(Q_UPPER_LL),
+        '▜' => Some(Q_UPPER_LR),
+        '▟' => Some(Q_UR_LOWER),
+        '▁' => Some(E1),
+        '▂' => Some(E2),
+        '▃' => Some(E3),
+        '▅' => Some(E5),
+        '▆' => Some(E6),
+        '▇' => Some(E7),
+        '▏' => Some(V1),
+        '▎' => Some(V2),
+        '▍' => Some(V3),
+        '▋' => Some(V5),
+        '▊' => Some(V6),
+        '▉' => Some(V7),
         '⏺' | '●' => Some(DOT),
-        '○'       => Some(EMPTY),
-        '◐'       => Some(DOT_L),
-        '◑'       => Some(DOT_R),
-        '◓'       => Some(DOT_U),
-        '◒'       => Some(DOT_D),
+        '○' => Some(EMPTY),
+        '◐' => Some(DOT_L),
+        '◑' => Some(DOT_R),
+        '◓' => Some(DOT_U),
+        '◒' => Some(DOT_D),
         _ => None,
     }
 }
@@ -2394,16 +2843,27 @@ fn block_header_label(block: &Block) -> String {
         BlockContent::ApprovalRequest { action, .. } => {
             format!("⚠ Approval Required: {}", action_summary(action))
         }
-        BlockContent::ToolCall { tool_name, input, .. } => {
+        BlockContent::ToolCall {
+            tool_name, input, ..
+        } => {
             if tool_name == "shell.exec" {
-                input.get("cmd").and_then(|v| v.as_str()).unwrap_or("shell").to_string()
+                input
+                    .get("cmd")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("shell")
+                    .to_string()
             } else {
-                let detail = input.get("path")
+                let detail = input
+                    .get("path")
                     .or_else(|| input.get("url"))
                     .or_else(|| input.get("query"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                if detail.is_empty() { format!("⚙ {}", tool_name) } else { format!("⚙ {} {}", tool_name, detail) }
+                if detail.is_empty() {
+                    format!("⚙ {}", tool_name)
+                } else {
+                    format!("⚙ {} {}", tool_name, detail)
+                }
             }
         }
         BlockContent::PlanNode { description, .. } => {
@@ -2418,31 +2878,34 @@ fn block_header_label(block: &Block) -> String {
 
 fn block_content_text(block: &Block) -> String {
     match &block.content {
-        BlockContent::ShellCommand { output, .. } => {
-            output
-                .rows
-                .iter()
-                .map(|row| row.cells.iter().map(|c| c.grapheme.as_str()).collect::<String>())
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-        BlockContent::AgentMessage { content_blocks, .. } => {
-            content_blocks
-                .iter()
-                .map(|cb| match cb {
-                    beyonder_core::ContentBlock::Text { text } => text.clone(),
-                    beyonder_core::ContentBlock::Code { code, language } => {
-                        let lang = language.as_deref().unwrap_or("");
-                        format!("```{}\n{}\n```", lang, code)
-                    }
-                    beyonder_core::ContentBlock::Thinking { thinking } => {
-                        format!("<thinking>{}</thinking>", thinking)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }
-        BlockContent::ApprovalRequest { action, reasoning, .. } => {
+        BlockContent::ShellCommand { output, .. } => output
+            .rows
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .map(|c| c.grapheme.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        BlockContent::AgentMessage { content_blocks, .. } => content_blocks
+            .iter()
+            .map(|cb| match cb {
+                beyonder_core::ContentBlock::Text { text } => text.clone(),
+                beyonder_core::ContentBlock::Code { code, language } => {
+                    let lang = language.as_deref().unwrap_or("");
+                    format!("```{}\n{}\n```", lang, code)
+                }
+                beyonder_core::ContentBlock::Thinking { thinking } => {
+                    format!("<thinking>{}</thinking>", thinking)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        BlockContent::ApprovalRequest {
+            action, reasoning, ..
+        } => {
             let mut text = action_detail(action);
             if let Some(r) = reasoning {
                 text.push('\n');
@@ -2532,7 +2995,9 @@ fn parse_inline(
             }
         }
         // Consume up to the next marker or end of line.
-        let next = rest.find("**").unwrap_or(rest.len())
+        let next = rest
+            .find("**")
+            .unwrap_or(rest.len())
             .min(rest.find('`').unwrap_or(rest.len()));
         if next == 0 {
             // rest starts with an unclosed marker — treat it as literal text

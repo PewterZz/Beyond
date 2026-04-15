@@ -1,6 +1,6 @@
+use super::{shell::ShellExec, Tool};
 use std::collections::HashMap;
 use std::sync::Arc;
-use super::{Tool, shell::ShellExec};
 
 pub struct ToolRegistry {
     tools: HashMap<&'static str, Arc<dyn Tool>>,
@@ -8,7 +8,9 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: HashMap::new() }
+        Self {
+            tools: HashMap::new(),
+        }
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {

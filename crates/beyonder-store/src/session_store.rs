@@ -44,10 +44,9 @@ impl<'a> SessionStore<'a> {
     }
 
     pub fn list_active(&self) -> StoreResult<Vec<Session>> {
-        let mut stmt = self
-            .store
-            .conn
-            .prepare("SELECT data FROM sessions WHERE status = 'Active' ORDER BY last_active DESC")?;
+        let mut stmt = self.store.conn.prepare(
+            "SELECT data FROM sessions WHERE status = 'Active' ORDER BY last_active DESC",
+        )?;
         let sessions = stmt
             .query_map([], |row| row.get::<_, String>(0))?
             .filter_map(|r| r.ok())

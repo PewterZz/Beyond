@@ -139,7 +139,7 @@ impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
             max_memory_bytes: Some(512 * 1024 * 1024), // 512 MB
-            max_cpu_time_secs: Some(300),               // 5 minutes
+            max_cpu_time_secs: Some(300),              // 5 minutes
             max_file_writes: None,
             max_network_calls: None,
             max_tokens: Some(100_000),

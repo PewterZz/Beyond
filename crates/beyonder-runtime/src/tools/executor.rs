@@ -1,8 +1,7 @@
+use super::{registry::ToolRegistry, ToolContext, ToolExecRequest, ToolOutput};
+use crate::capability_broker::{ActionDecision, ApprovalDecision, CapabilityBroker};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use beyonder_core::{AgentId, SessionId};
-use super::{ToolExecRequest, ToolOutput, ToolContext, registry::ToolRegistry};
-use crate::capability_broker::{ActionDecision, ApprovalDecision, CapabilityBroker};
 
 pub struct ToolExecutor {
     pub registry: ToolRegistry,
@@ -33,7 +32,9 @@ impl ToolExecutor {
 
         let action = tool.required_action(&request.input);
 
-        let decision = broker.check_action(&request.agent_id, &action, &request.session_id).await;
+        let decision = broker
+            .check_action(&request.agent_id, &action, &request.session_id)
+            .await;
 
         match decision {
             ActionDecision::Denied(reason) => {
@@ -46,23 +47,19 @@ impl ToolExecutor {
                     Err(e) => ToolOutput::error(format!("Tool execution error: {e}")),
                 }
             }
-            ActionDecision::NeedsApproval { approval_rx } => {
-                match approval_rx.await {
-                    Ok(ApprovalDecision::Granted) | Ok(ApprovalDecision::GrantedAlways) => {
-                        let cancel = CancellationToken::new();
-                        match tool.execute(request.input, ctx, cancel).await {
-                            Ok(output) => output,
-                            Err(e) => ToolOutput::error(format!("Tool execution error: {e}")),
-                        }
-                    }
-                    Ok(ApprovalDecision::Denied) => {
-                        ToolOutput::error("Permission denied by user".to_string())
-                    }
-                    Err(_) => {
-                        ToolOutput::error("Approval channel closed".to_string())
+            ActionDecision::NeedsApproval { approval_rx } => match approval_rx.await {
+                Ok(ApprovalDecision::Granted) | Ok(ApprovalDecision::GrantedAlways) => {
+                    let cancel = CancellationToken::new();
+                    match tool.execute(request.input, ctx, cancel).await {
+                        Ok(output) => output,
+                        Err(e) => ToolOutput::error(format!("Tool execution error: {e}")),
                     }
                 }
-            }
+                Ok(ApprovalDecision::Denied) => {
+                    ToolOutput::error("Permission denied by user".to_string())
+                }
+                Err(_) => ToolOutput::error("Approval channel closed".to_string()),
+            },
         }
     }
 }
