@@ -60,6 +60,7 @@ pub struct Renderer {
     // Input bar state (synced from App before each render)
     pub input_text: String,
     pub input_cursor: usize,
+    pub input_all_selected: bool,
     pub input_mode_prefix: String,
 
     /// Selected block index — highlighted on screen, text copyable via Cmd+C.
@@ -271,6 +272,7 @@ impl Renderer {
             blocks: vec![],
             input_text: String::new(),
             input_cursor: 0,
+            input_all_selected: false,
             input_mode_prefix: "> ".to_string(),
             selected_block: None,
             selected_sub_output: false,
@@ -1310,9 +1312,16 @@ impl Renderer {
             let cursor = self.input_cursor.min(self.input_text.len());
             let before = &self.input_text[..cursor];
             let after = &self.input_text[cursor..];
-            let caret = if self.cursor_blink_on { "▌" } else { " " };
-            let text = format!("{}{}{}{}", self.input_mode_prefix, before, caret, after);
-            let col = GlyphColor::rgb(205, 214, 244);
+            let (text, col) = if self.input_all_selected {
+                // Render the whole line in accent colour with a block cursor to
+                // signal "all selected — next keystroke replaces everything".
+                let t = format!("{}█{}", self.input_mode_prefix, self.input_text);
+                (t, GlyphColor::rgb(137, 180, 250)) // Catppuccin Blue
+            } else {
+                let caret = if self.cursor_blink_on { "▌" } else { " " };
+                let t = format!("{}{}{}{}", self.input_mode_prefix, before, caret, after);
+                (t, GlyphColor::rgb(205, 214, 244))
+            };
             let buf = self.make_buffer(&text, text_w, phys_font, col);
             results.push((buf, text_x, text_y, text_w, line_h, col));
         }

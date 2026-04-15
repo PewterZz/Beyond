@@ -646,10 +646,90 @@ impl App {
         }
     }
 
+    /// Scan PTY output for OSC 52 clipboard sequences and handle them.
+    ///
+    /// OSC 52 is how TUI apps (nvim, tmux, Claude Code) read and write the
+    /// system clipboard without requiring xclip/pbcopy. Two operations:
+    ///   • Write: `\x1b]52;{Pc};{base64_data}\x07` — set clipboard to decoded text
+    ///   • Read:  `\x1b]52;{Pc};?\x07`             — respond with clipboard contents
+    ///
+    /// Returns a response to write back to the PTY if a read query was found.
+    fn handle_osc52(&self, bytes: &[u8]) -> Option<String> {
+        use base64::Engine;
+        let s = std::str::from_utf8(bytes).ok()?;
+        let mut response: Option<String> = None;
+        let mut haystack = s;
+        while let Some(start) = haystack.find("\x1b]52;") {
+            let rest = &haystack[start + 5..]; // skip past "\x1b]52;"
+            // Find the OSC terminator: BEL (\x07) or ST (\x1b\)
+            let (payload, advance) = if let Some(pos) = rest.find('\x07') {
+                (&rest[..pos], pos + 1)
+            } else if let Some(pos) = rest.find("\x1b\\") {
+                (&rest[..pos], pos + 2)
+            } else {
+                break; // incomplete sequence — skip
+            };
+            // payload = "Pc;Pd"
+            if let Some(semi) = payload.find(';') {
+                let pc = &payload[..semi];
+                let pd = &payload[semi + 1..];
+                if pd == "?" {
+                    // Read query: send clipboard contents back to the PTY.
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        if let Ok(text) = cb.get_text() {
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
+                            response = Some(format!("\x1b]52;{pc};{encoded}\x07"));
+                        }
+                    }
+                } else if !pd.is_empty() {
+                    // Write: decode base64 and put into clipboard.
+                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(pd) {
+                        if let Ok(text) = String::from_utf8(decoded) {
+                            if let Ok(mut cb) = arboard::Clipboard::new() {
+                                let _ = cb.set_text(text);
+                            }
+                        }
+                    }
+                }
+            }
+            haystack = &rest[advance..];
+        }
+        response
+    }
+
     async fn handle_key(&mut self, event: &KeyEvent) {
         if event.state != ElementState::Pressed {
             return;
         }
+
+        // Cmd+V (macOS) / Ctrl+V (other) — paste from clipboard.
+        // Handled before TUI forwarding so it works in both the input box and
+        // TUI apps (nvim, claude, htop). TUI path uses bracketed-paste protocol.
+        let is_paste = if cfg!(target_os = "macos") {
+            self.modifiers.super_key()
+        } else {
+            self.modifiers.control_key()
+        };
+        if is_paste {
+            if let Key::Character(s) = &event.logical_key {
+                if s.as_str() == "v" {
+                    if let Ok(mut cb) = arboard::Clipboard::new() {
+                        if let Ok(text) = cb.get_text() {
+                            if self.term_grid.tui_active() || self.block_builder.is_running_command() {
+                                // Bracketed paste: wraps pasted text so TUI apps
+                                // (nvim insert mode, etc.) receive it correctly.
+                                let payload = format!("\x1b[200~{text}\x1b[201~");
+                                self.write_to_pty(&payload);
+                            } else {
+                                self.input.insert_text(&text);
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+
         // TUI/interactive mode: forward all keys directly to PTY as raw bytes.
         // Covers both alt-screen TUIs (vim, htop) and raw-mode apps (claude, React Ink).
         if self.term_grid.tui_active() || self.block_builder.is_running_command() {
@@ -660,16 +740,62 @@ impl App {
             }
             return;
         }
-        // Cmd+C — copy selected block text to clipboard.
-        #[cfg(target_os = "macos")]
-        if self.modifiers.super_key() {
+        // Cmd+* shortcuts (macOS) / Ctrl+* shortcuts (other) for the input box.
+        let super_or_ctrl = if cfg!(target_os = "macos") {
+            self.modifiers.super_key()
+        } else {
+            self.modifiers.control_key()
+        };
+        if super_or_ctrl {
             if let Key::Character(s) = &event.logical_key {
-                if s.as_str() == "c" {
-                    self.copy_selection();
-                    return;
+                match s.as_str() {
+                    "c" => { self.copy_selection(); return; }
+                    "a" => { self.input.select_all(); return; }
+                    "x" => {
+                        // Cut: copy all input text to clipboard then clear.
+                        if !self.input.text.is_empty() {
+                            if let Ok(mut cb) = arboard::Clipboard::new() {
+                                let _ = cb.set_text(self.input.text.clone());
+                            }
+                            self.input.select_all();
+                            self.input.delete_backward();
+                        }
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            // Cmd/Ctrl+Left = home, Cmd/Ctrl+Right = end.
+            match &event.logical_key {
+                Key::Named(NamedKey::ArrowLeft)  => { self.input.move_home(); return; }
+                Key::Named(NamedKey::ArrowRight) => { self.input.move_end();  return; }
+                _ => {}
+            }
+        }
+
+        // Alt/Option+Left/Right — word navigation.
+        if self.modifiers.alt_key() {
+            match &event.logical_key {
+                Key::Named(NamedKey::ArrowLeft)  => { self.input.word_left();  return; }
+                Key::Named(NamedKey::ArrowRight) => { self.input.word_right(); return; }
+                _ => {}
+            }
+        }
+
+        // Readline-style Ctrl+* shortcuts (always active, both platforms).
+        if self.modifiers.control_key() {
+            if let Key::Character(s) = &event.logical_key {
+                match s.as_str() {
+                    "a" => { self.input.move_home();             return; }
+                    "e" => { self.input.move_end();              return; }
+                    "k" => { self.input.kill_to_end();           return; }
+                    "u" => { self.input.kill_to_start();         return; }
+                    "w" => { self.input.delete_word_backward();  return; }
+                    _ => {}
                 }
             }
         }
+
         match &event.logical_key {
             Key::Named(NamedKey::Enter) => {
                 if !self.input.is_empty() {
@@ -1088,11 +1214,18 @@ impl App {
         }
 
         let had_pty_output = !pty_output.is_empty();
+        // Collect OSC 52 read-query responses before the mutable feed loop.
+        let osc52_responses: Vec<String> = pty_output.iter()
+            .filter_map(|b| self.handle_osc52(b))
+            .collect();
         for bytes in pty_output {
             self.term_grid.feed(&bytes);
             for event in self.block_builder.feed(&bytes) {
                 self.handle_build_event(event);
             }
+        }
+        for response in osc52_responses {
+            self.write_to_pty(&response);
         }
 
         // If the PTY process died, force-complete any running block.
@@ -1415,6 +1548,7 @@ impl App {
         // Input bar: always show normally — no running state or color change.
         self.renderer.input_text = self.input.text.clone();
         self.renderer.input_cursor = self.input.cursor;
+        self.renderer.input_all_selected = self.input.all_selected;
         self.renderer.input_mode_prefix = match detect_mode(&self.input.text) {
             InputMode::Shell => String::new(),
             InputMode::Agent { name } => format!("@{} ", name),
