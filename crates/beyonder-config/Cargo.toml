@@ -1,0 +1,13 @@
+[package]
+name = "beyonder-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+beyonder-core = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+dirs-next = "2"

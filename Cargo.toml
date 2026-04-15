@@ -1,0 +1,93 @@
+[workspace]
+members = [
+    ".",
+    "crates/beyonder-core",
+    "crates/beyonder-store",
+    "crates/beyonder-terminal",
+    "crates/beyonder-acp",
+    "crates/beyonder-runtime",
+    "crates/beyonder-gpu",
+    "crates/beyonder-ui",
+    "crates/beyonder-config",
+]
+resolver = "2"
+
+[package]
+name = "beyonder"
+version.workspace = true
+edition.workspace = true
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Beyonder Contributors"]
+license = "MIT"
+
+[workspace.dependencies]
+# Core
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ulid = { version = "1", features = ["serde"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Terminal
+portable-pty = "0.8"
+alacritty_terminal = "0.26"
+
+# GPU / Windowing
+wgpu = "24"
+winit = "0.30"
+glyphon = "0.8"
+
+# Config
+toml = "0.8"
+
+# Protocol
+bytes = "1"
+
+# HTTP client (Ollama provider)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = "0.3"
+
+# Clipboard
+arboard = "3"
+
+# Internal crates
+beyonder-core = { path = "crates/beyonder-core" }
+beyonder-store = { path = "crates/beyonder-store" }
+beyonder-terminal = { path = "crates/beyonder-terminal" }
+beyonder-acp = { path = "crates/beyonder-acp" }
+beyonder-runtime = { path = "crates/beyonder-runtime" }
+beyonder-gpu = { path = "crates/beyonder-gpu" }
+beyonder-ui = { path = "crates/beyonder-ui" }
+beyonder-config = { path = "crates/beyonder-config" }
+
+[dependencies]
+beyonder-ui = { workspace = true }
+beyonder-config = { workspace = true }
+winit = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

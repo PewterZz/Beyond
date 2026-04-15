@@ -1,0 +1,19 @@
+[package]
+name = "beyonder-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+beyonder-core = { workspace = true }
+beyonder-acp = { workspace = true }
+beyonder-store = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+futures-util = { workspace = true }

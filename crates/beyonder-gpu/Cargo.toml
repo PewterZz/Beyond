@@ -1,0 +1,17 @@
+[package]
+name = "beyonder-gpu"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+beyonder-core = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+glyphon = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }

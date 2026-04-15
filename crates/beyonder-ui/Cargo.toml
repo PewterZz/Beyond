@@ -1,0 +1,23 @@
+[package]
+name = "beyonder-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+beyonder-core = { workspace = true }
+beyonder-acp = { workspace = true }
+beyonder-gpu = { workspace = true }
+beyonder-runtime = { workspace = true }
+beyonder-terminal = { workspace = true }
+beyonder-store = { workspace = true }
+beyonder-config = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+arboard = { workspace = true }
+chrono = { workspace = true }
