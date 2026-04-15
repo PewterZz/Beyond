@@ -26,7 +26,7 @@ beyonder_preexec() {{
 beyonder_precmd() {{
     local code=$?
     printf '\033]633;B;%d\007' "$code"
-    printf '\033]633;P\007'
+    printf '\033]633;P;Cwd=%s\007' "$PWD"
 }}
 
 autoload -Uz add-zsh-hook
@@ -49,8 +49,9 @@ beyonder_preexec() {{
 }}
 
 beyonder_precmd() {{
-    printf '\033]633;B;%d\007' "$?"
-    printf '\033]633;P\007'
+    local code=$?
+    printf '\033]633;B;%d\007' "$code"
+    printf '\033]633;P;Cwd=%s\007' "$PWD"
 }}
 
 trap 'beyonder_preexec "$BASH_COMMAND"' DEBUG

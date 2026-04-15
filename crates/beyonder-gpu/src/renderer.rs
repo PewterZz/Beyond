@@ -28,6 +28,9 @@ const MAX_INPUT_LINES: usize = 4;
 const TAB_BAR_HEIGHT: f32 = 28.0;
 /// Horizontal padding around the block stream.
 const PADDING: f32 = 4.0;
+/// Inset (logical px) around TUI fullscreen content — keeps app output off the
+/// window edge. Multiplied by scale_factor for physical px.
+const TUI_PAD: f32 = 8.0;
 /// Vertical gap between blocks.
 const GAP: f32 = 2.0;
 
@@ -648,8 +651,9 @@ impl Renderer {
     /// Terminal grid dimensions for TUI fullscreen mode (bar hidden — full window).
     pub fn tui_grid_size(&self) -> (u16, u16) {
         let (cell_w, cell_h) = self.terminal_cell_size();
-        let full_w = self.surface_config.width as f32;
-        let full_h = self.surface_config.height as f32;
+        let pad = TUI_PAD * self.scale_factor;
+        let full_w = (self.surface_config.width as f32 - pad * 2.0).max(cell_w);
+        let full_h = (self.surface_config.height as f32 - pad * 2.0).max(cell_h);
         let cols = (full_w / cell_w).floor().max(40.0) as u16;
         let rows = (full_h / cell_h).floor().max(10.0) as u16;
         (cols, rows)
@@ -1071,18 +1075,18 @@ impl Renderer {
 
         // Mode switcher pill.
         {
-            let mode_text = format!("◈  {}", self.mode_label);
+            let mode_text = self.mode_label.clone();
             let mode_w = mode_text.chars().count() as f32 * pill_char_w + 2.0 * pill_hpad;
             let mode_h = 20.0 * sc;
             let mode_x = 14.0 * sc;
             let mode_y = bar_y + bar_h - mode_h - 8.0 * sc;
             let mode_bg = match self.mode_label.as_str() {
-                "cmd"   => [0.065, 0.095, 0.155, 1.0],
+                "shell" => [0.065, 0.095, 0.155, 1.0],
                 "agent" => [0.095, 0.065, 0.155, 1.0],
                 _       => [0.098, 0.098, 0.118, 1.0],
             };
             let mode_border = match self.mode_label.as_str() {
-                "cmd"   => [0.537, 0.706, 0.980, 0.8],
+                "shell" => [0.537, 0.706, 0.980, 0.8],
                 "agent" => [0.792, 0.651, 0.988, 0.8],
                 _       => [0.345, 0.357, 0.439, 0.6],
             };
@@ -1158,27 +1162,71 @@ impl Renderer {
 
     fn layout_tui(&self, rects: &mut Vec<RectInstance>) {
         let (cell_w, cell_h) = self.tui_cell_size();
-        // Bar is hidden in TUI mode — fill the full window.
-        let bar_y = self.surface_config.height as f32;
+        let pad = TUI_PAD * self.scale_factor;
+        // Bar is hidden in TUI mode — fill the full window (minus pad).
+        let bar_y = self.surface_config.height as f32 - pad;
 
         for (row_idx, row) in self.tui_cells.iter().enumerate() {
-            let row_y = (row_idx as f32 * cell_h).floor();
+            let row_y = (pad + row_idx as f32 * cell_h).floor();
             if row_y >= bar_y { break; }
-            // cell_h is measured to the exact font ascent+descent — no extra pixel.
-            let rect_h = cell_h.ceil();
+            // Size the rect to exactly the gap to the next row's snapped y — plus 1px
+            // overlap — so bg rects tile without sub-pixel black seams.
+            let next_y = (pad + (row_idx + 1) as f32 * cell_h).floor();
+            let rect_h = (next_y - row_y).max(1.0) + 1.0;
             if row.is_empty() { continue; }
             for (col_idx, cell) in row.iter().enumerate() {
+                let col_x = (pad + col_idx as f32 * cell_w).floor();
+                let next_x = (pad + (col_idx + 1) as f32 * cell_w).floor();
+                let rect_w = (next_x - col_x).max(1.0) + 1.0;
+                // 1) Bg rect (covers whole cell).
                 if let Some(bg) = cell.bg {
-                    let col_x = (col_idx as f32 * cell_w).floor();
-                    let rect_w = cell_w.ceil() + 1.0;
                     rects.push(RectInstance::filled(col_x, row_y, rect_w, rect_h, [bg[0], bg[1], bg[2], 1.0]));
+                }
+                // 2) Block / quadrant / shade / circle chars: paint fg as
+                // geometric sub-rects so pixel-art (claude avatar, progress
+                // bars, indicators) renders sharply regardless of glyph.
+                if let Some(geom) = block_char_geom(cell.ch) {
+                    let fg = cell.fg;
+                    let col = [fg[0], fg[1], fg[2], 1.0];
+                    for sub in geom {
+                        if sub.rounded {
+                            // Compute the circle's bounding square from the
+                            // shorter cell dimension so the dot stays round —
+                            // a rounded rect with unequal w/h renders as a pill.
+                            // 0.55 = visual match with iTerm/ghostty ⏺ sizing.
+                            let side = rect_w.min(rect_h) * 0.55;
+                            // sub.w / sub.h describe which fraction of the full
+                            // disc this sub-glyph covers. Scale the square by
+                            // those fractions and re-anchor within the cell.
+                            let sub_w_px = (sub.w * 2.0 * side).ceil();
+                            let sub_h_px = (sub.h * 2.0 * side).ceil();
+                            let cx = col_x + rect_w * 0.5;
+                            let cy = row_y + rect_h * 0.5;
+                            // sub.x/sub.y are in the full-disc reference frame
+                            // (0..1 == left..right of the virtual bounding box).
+                            // Shift them so 0.5 maps to the cell center.
+                            let sub_x = (cx + (sub.x - 0.5) * 2.0 * side).floor();
+                            let sub_y = (cy + (sub.y - 0.5) * 2.0 * side).floor();
+                            let inst = RectInstance::filled(sub_x, sub_y, sub_w_px, sub_h_px, col);
+                            // Full radius = side (half of 2*side) for crisp
+                            // circles; half-discs become capsules which read
+                            // as animation frames.
+                            rects.push(inst.with_radius(side));
+                        } else {
+                            let sub_x = col_x + (sub.x * rect_w).floor();
+                            let sub_y = row_y + (sub.y * rect_h).floor();
+                            let sub_w = (sub.w * rect_w).ceil() + 1.0;
+                            let sub_h = (sub.h * rect_h).ceil() + 1.0;
+                            rects.push(RectInstance::filled(sub_x, sub_y, sub_w, sub_h, col));
+                        }
+                    }
                 }
             }
         }
         // Cursor — shape depends on what the TUI app requested.
         let (cur_row, cur_col) = self.tui_cursor;
-        let cx = (cur_col as f32 * cell_w).floor();
-        let cy = (cur_row as f32 * cell_h).floor();
+        let cx = (pad + cur_col as f32 * cell_w).floor();
+        let cy = (pad + cur_row as f32 * cell_h).floor();
         if cy < bar_y {
             let cursor_color = [0.804, 0.835, 0.918, 0.55_f32];
             match self.tui_cursor_shape {
@@ -1202,9 +1250,10 @@ impl Renderer {
 
     fn build_tui_text_buffers(&mut self) -> TextBufList {
         let (cell_w, cell_h) = self.tui_cell_size();
-        // Bar is hidden in TUI mode — fill the full window.
-        let bar_y = self.surface_config.height as f32;
         let sc = self.scale_factor;
+        let pad = TUI_PAD * sc;
+        // Bar is hidden in TUI mode — fill the full window (minus pad).
+        let bar_y = self.surface_config.height as f32 - pad;
         let phys_font = self.font_size * sc;
         let mut results = TextBufList::new();
 
@@ -1212,7 +1261,7 @@ impl Renderer {
         for (row_idx, row) in cells.iter().enumerate() {
             if row.is_empty() { continue; }
             // Match the snapped y from layout_tui so text sits exactly on its bg rect.
-            let y = (row_idx as f32 * cell_h).floor();
+            let y = (pad + row_idx as f32 * cell_h).floor();
             if y >= bar_y { break; }
 
             // Per-run rendering: each color run is positioned at its exact column pixel
@@ -1220,7 +1269,7 @@ impl Renderer {
             // Nerd Font icons) are contained and don't shift subsequent text rightward.
             let runs = self.make_tui_row_runs(&row, cell_w, phys_font);
             for (buf, x, w, color) in runs {
-                results.push((buf, x, y, w, cell_h, color));
+                results.push((buf, pad + x, y, w, cell_h, color));
             }
         }
         results
@@ -1620,11 +1669,11 @@ impl Renderer {
         {
             let [mode_x, mode_y, mode_w, mode_h] = self.mode_pill_rect;
             if mode_w > 0.0 {
-                let mode_text = format!("◈  {}", self.mode_label);
+                let mode_text = self.mode_label.clone();
                 let mode_font = phys_font * 0.75;
                 let mode_line_h = mode_font * 1.4;
                 let mode_color = match self.mode_label.as_str() {
-                    "cmd"   => GlyphColor::rgb(137, 180, 250),
+                    "shell" => GlyphColor::rgb(137, 180, 250),
                     "agent" => GlyphColor::rgb(203, 166, 247),
                     _       => GlyphColor::rgb(147, 153, 178),
                 };
@@ -1949,8 +1998,14 @@ impl Renderer {
                 i += 1;
             }
             let run_cells = &cells[run_start..i];
+            // Replace block/quadrant/circle chars with spaces — they're painted
+            // as rects in layout_tui so the glyph would double up and misalign.
+            // Keep hollow circle (○) as a glyph since we don't paint an outline.
             let text: String = run_cells.iter().map(|c| {
-                if (c.ch as u32) < 32 { ' ' } else { c.ch }
+                if (c.ch as u32) < 32 { ' ' }
+                else if matches!(c.ch, '○') { c.ch }
+                else if block_char_geom(c.ch).is_some() { ' ' }
+                else { c.ch }
             }).collect();
             if text.trim().is_empty() { continue; }
 
@@ -1976,6 +2031,82 @@ impl Renderer {
             result.push((buf, x, w, color));
         }
         result
+    }
+}
+
+/// Sub-rect within a cell, fractions in [0,1]. Rounded flag draws as a
+/// rounded rect with radius = min(w,h)/2 — used to approximate filled circles
+/// for claude's tool-execution indicators (`⏺ ● ○ ◐ ◑ ◒ ◓`).
+#[derive(Copy, Clone)]
+struct SubRect { x: f32, y: f32, w: f32, h: f32, rounded: bool }
+
+const fn sr(x: f32, y: f32, w: f32, h: f32) -> SubRect {
+    SubRect { x, y, w, h, rounded: false }
+}
+const fn sc(x: f32, y: f32, w: f32, h: f32) -> SubRect {
+    SubRect { x, y, w, h, rounded: true }
+}
+
+/// Geometry for block / half-block / quadrant / shade / circle Unicode
+/// characters. Returns a slice of sub-rects to paint with the cell's fg color.
+/// This guarantees pixel-perfect tiling for pixel-art avatars, progress bars,
+/// and compact colored indicators that the font's glyph might not render cleanly.
+fn block_char_geom(ch: char) -> Option<&'static [SubRect]> {
+    const FULL:   &[SubRect] = &[sr(0.0, 0.0, 1.0, 1.0)];
+    const UPPER:  &[SubRect] = &[sr(0.0, 0.0, 1.0, 0.5)];
+    const LOWER:  &[SubRect] = &[sr(0.0, 0.5, 1.0, 0.5)];
+    const LEFT:   &[SubRect] = &[sr(0.0, 0.0, 0.5, 1.0)];
+    const RIGHT:  &[SubRect] = &[sr(0.5, 0.0, 0.5, 1.0)];
+    const QUL:    &[SubRect] = &[sr(0.0, 0.0, 0.5, 0.5)];
+    const QUR:    &[SubRect] = &[sr(0.5, 0.0, 0.5, 0.5)];
+    const QLL:    &[SubRect] = &[sr(0.0, 0.5, 0.5, 0.5)];
+    const QLR:    &[SubRect] = &[sr(0.5, 0.5, 0.5, 0.5)];
+    const Q_UL_LR: &[SubRect] = &[sr(0.0, 0.0, 0.5, 0.5), sr(0.5, 0.5, 0.5, 0.5)];
+    const Q_UR_LL: &[SubRect] = &[sr(0.5, 0.0, 0.5, 0.5), sr(0.0, 0.5, 0.5, 0.5)];
+    const Q_UL_LOWER: &[SubRect] = &[sr(0.0, 0.0, 0.5, 0.5), sr(0.0, 0.5, 1.0, 0.5)];
+    const Q_UPPER_LL: &[SubRect] = &[sr(0.0, 0.0, 1.0, 0.5), sr(0.0, 0.5, 0.5, 0.5)];
+    const Q_UPPER_LR: &[SubRect] = &[sr(0.0, 0.0, 1.0, 0.5), sr(0.5, 0.5, 0.5, 0.5)];
+    const Q_UR_LOWER: &[SubRect] = &[sr(0.5, 0.0, 0.5, 0.5), sr(0.0, 0.5, 1.0, 0.5)];
+    const E1: &[SubRect] = &[sr(0.0, 0.875, 1.0, 0.125)];
+    const E2: &[SubRect] = &[sr(0.0, 0.75,  1.0, 0.25)];
+    const E3: &[SubRect] = &[sr(0.0, 0.625, 1.0, 0.375)];
+    const E5: &[SubRect] = &[sr(0.0, 0.375, 1.0, 0.625)];
+    const E6: &[SubRect] = &[sr(0.0, 0.25,  1.0, 0.75)];
+    const E7: &[SubRect] = &[sr(0.0, 0.125, 1.0, 0.875)];
+    const V1: &[SubRect] = &[sr(0.0, 0.0, 0.125, 1.0)];
+    const V2: &[SubRect] = &[sr(0.0, 0.0, 0.25,  1.0)];
+    const V3: &[SubRect] = &[sr(0.0, 0.0, 0.375, 1.0)];
+    const V5: &[SubRect] = &[sr(0.0, 0.0, 0.625, 1.0)];
+    const V6: &[SubRect] = &[sr(0.0, 0.0, 0.75,  1.0)];
+    const V7: &[SubRect] = &[sr(0.0, 0.0, 0.875, 1.0)];
+    // Coords are fractions of the virtual disc bounding box (0..1). The
+    // rounded-rect renderer re-anchors them to a cell-centered square whose
+    // side == min(cell_w, cell_h) * 0.55 so dots stay round.
+    const DOT:     &[SubRect] = &[sc(0.0, 0.0, 1.0, 1.0)];
+    const DOT_L:   &[SubRect] = &[sc(0.0, 0.0, 0.5, 1.0)];
+    const DOT_R:   &[SubRect] = &[sc(0.5, 0.0, 0.5, 1.0)];
+    const DOT_U:   &[SubRect] = &[sc(0.0, 0.0, 1.0, 0.5)];
+    const DOT_D:   &[SubRect] = &[sc(0.0, 0.5, 1.0, 0.5)];
+    const EMPTY:   &[SubRect] = &[];
+    match ch {
+        '█' => Some(FULL),
+        '▀' => Some(UPPER), '▄' => Some(LOWER),
+        '▌' => Some(LEFT),  '▐' => Some(RIGHT),
+        '▘' => Some(QUL), '▝' => Some(QUR), '▖' => Some(QLL), '▗' => Some(QLR),
+        '▚' => Some(Q_UL_LR), '▞' => Some(Q_UR_LL),
+        '▙' => Some(Q_UL_LOWER), '▛' => Some(Q_UPPER_LL),
+        '▜' => Some(Q_UPPER_LR), '▟' => Some(Q_UR_LOWER),
+        '▁' => Some(E1), '▂' => Some(E2), '▃' => Some(E3),
+        '▅' => Some(E5), '▆' => Some(E6), '▇' => Some(E7),
+        '▏' => Some(V1), '▎' => Some(V2), '▍' => Some(V3),
+        '▋' => Some(V5), '▊' => Some(V6), '▉' => Some(V7),
+        '⏺' | '●' => Some(DOT),
+        '○'       => Some(EMPTY),
+        '◐'       => Some(DOT_L),
+        '◑'       => Some(DOT_R),
+        '◓'       => Some(DOT_U),
+        '◒'       => Some(DOT_D),
+        _ => None,
     }
 }
 

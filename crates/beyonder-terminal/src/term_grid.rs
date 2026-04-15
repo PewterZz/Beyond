@@ -6,6 +6,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, TermMode};
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor, Rgb};
 use alacritty_terminal::Term;
 use beyonder_core::TuiCell;
@@ -45,6 +46,26 @@ impl TermGrid {
 
     /// Feed raw PTY bytes into the terminal state machine.
     pub fn feed(&mut self, bytes: &[u8]) {
+        // Dump raw PTY bytes (escaped) to BEYONDER_PTY_LOG when set — useful for
+        // diagnosing glyph/escape-sequence mismatches without fighting stderr.
+        if let Ok(path) = std::env::var("BEYONDER_PTY_LOG") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let mut out = String::new();
+                for &b in bytes {
+                    match b {
+                        0x1b => out.push_str("\\e"),
+                        0x07 => out.push_str("\\a"),
+                        0x0a => out.push_str("\\n\n"),
+                        0x0d => out.push_str("\\r"),
+                        0x09 => out.push_str("\\t"),
+                        0x20..=0x7e => out.push(b as char),
+                        _ => out.push_str(&format!("\\x{:02x}", b)),
+                    }
+                }
+                let _ = f.write_all(out.as_bytes());
+            }
+        }
         self.processor.advance(&mut self.term, bytes);
     }
 
@@ -67,6 +88,24 @@ impl TermGrid {
         self.rows = rows;
         let size = GridSize { cols, rows };
         self.term.resize(size);
+    }
+
+    /// Scroll the display back into history by `delta` lines (positive = up into
+    /// scrollback, negative = down toward the live screen). No-op in alt-screen
+    /// because alt-screen keeps no history. Clamped by alacritty to the grid's
+    /// `history_size()`.
+    pub fn scroll_display(&mut self, delta: i32) {
+        self.term.scroll_display(Scroll::Delta(delta));
+    }
+
+    /// Reset the display offset to the live screen (scroll all the way down).
+    pub fn scroll_to_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
+    /// Current display offset in lines above the live screen (0 = live, >0 = in history).
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
     }
 
     /// True when an alternate-screen TUI app is active.
@@ -97,7 +136,14 @@ impl TermGrid {
         let col = grid.cursor.point.column.0;
         let rows = self.term.screen_lines();
         let cols = self.term.columns();
-        (row.min(rows.saturating_sub(1)), col.min(cols.saturating_sub(1)))
+        // Live row is relative to the live screen (0..rows). When the user
+        // scrolls back into history the live cursor is below the viewport, so
+        // shift the returned row by the current display_offset. Rows >= screen
+        // height naturally fall outside the renderer's draw band and the
+        // cursor disappears — matches how real terminals behave.
+        let offset = grid.display_offset();
+        let visible = row.saturating_add(offset);
+        (visible.min(rows.saturating_add(offset)), col.min(cols.saturating_sub(1)))
     }
 
     /// Extract the full screen grid as TuiCells.
@@ -105,10 +151,13 @@ impl TermGrid {
         let rows = self.term.screen_lines();
         let cols = self.term.columns();
         let grid = self.term.grid();
+        // Shift every read upward by display_offset so scrollback is visible.
+        // 0 = live screen; positive = N lines back into history.
+        let offset = grid.display_offset() as i32;
         let mut result = Vec::with_capacity(rows);
 
         for row_idx in 0..rows {
-            let line = Line(row_idx as i32);
+            let line = Line(row_idx as i32 - offset);
             let mut row_cells = Vec::with_capacity(cols);
             for col_idx in 0..cols {
                 let col = Column(col_idx);

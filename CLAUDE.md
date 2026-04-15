@@ -103,6 +103,42 @@ The input bar height is dynamic (see beyonder-gpu above). It grows by one `font_
 - `App::add_block` and `App::push_text_block` only call `scroll_to_bottom()` when `pinned_to_bottom` is already true — new agent/shell/approval blocks don't yank the user back down mid-read.
 - Explicit user actions (submitting a prompt via `push_user_block` / `push_pending_agent_block`, and `/clear`) unconditionally re-pin to bottom.
 
+## TUI / Full-Screen App Rendering
+
+Beyonder hosts TUIs (nvim, htop, `claude`) in the same block stream by switching into a **full-window cell grid** mode. Two triggers:
+1. `term_grid.tui_active()` — alt-screen apps (sets `DECSET 1049`).
+2. Name-matched interactive CLIs in `App::render` — currently `claude` / `claude-code`, which don't use alt-screen but still take over the window. When either is true, `Renderer::tui_active = true`.
+
+Important invariants:
+- **PTY sizing**: when TUI is active (either trigger), the PTY is resized to `Renderer::tui_grid_size()` (full window minus `TUI_PAD`). Both the `Resized` handler (`app.rs`) *and* the per-tick transition detector must OR-in the `interactive_cli` check — otherwise name-classified TUIs get `terminal_grid_size()` (above-bar) and leave a dead band at the bottom.
+- **Padding**: `TUI_PAD = 8.0` logical px inset on all four sides in `layout_tui` / `build_tui_text_buffers` / `tui_grid_size`. Don't let cells touch the window edge.
+- **Input bar hidden**: `bar_hidden = tui_active` in `Renderer::render`. Keystrokes are forwarded to the PTY via `key_to_pty_bytes` (arrow keys respect `app_cursor_mode` via `\x1bO[ABCD]` vs `\x1b[[ABCD]`).
+- **Scrollback**: mouse wheel over a TUI calls `TermGrid::scroll_display(delta)` which moves alacritty's `display_offset`. `cell_grid()` shifts each read by `-display_offset`, and `cursor_pos()` shifts by `+display_offset` so the live cursor disappears into history instead of following the viewport. After scroll_display, `tui_cells` is re-read immediately (it's otherwise only refreshed on PTY output). Any keypress calls `scroll_to_bottom()` to snap back to the live screen — matches xterm/iTerm.
+- **Wheel delta**: on macOS trackpads `PixelDelta` fires many small events per gesture. Divide by `cell_h` (not a hard-coded constant) and accumulate the fractional remainder in `scroll_accum` so continuous gestures don't round to zero.
+- **Alt-screen caveat**: alt-screen apps keep `history_size = 0`, so wheel-scroll is a no-op in vim/htop by design. Claude runs primary-screen so it *does* get scrollback.
+
+## Block-Char Geometric Rendering
+
+Cell-based TUIs (especially pixel-art avatars, progress bars, and tool-execution indicators) rely on block / half-block / quadrant / circle glyphs tiling seamlessly. Fonts can't guarantee that at non-integer scale factors, so `block_char_geom(ch)` in `renderer.rs` returns a static slice of `SubRect`s for known chars — `layout_tui` paints them as geometry rects in the cell's fg color and `make_tui_row_runs` filters them out of the text runs to avoid double-draw.
+
+Covered chars:
+- Full / half blocks: `█ ▀ ▄ ▌ ▐`
+- Quadrants: `▘ ▝ ▖ ▗ ▚ ▞ ▙ ▛ ▜ ▟`
+- Horizontal eighth blocks: `▁ ▂ ▃ ▅ ▆ ▇` (and `▄` as half)
+- Vertical eighth blocks: `▏ ▎ ▍ ▋ ▊ ▉` (and `▌` as half)
+- Circle indicators: `⏺ ● ◐ ◑ ◒ ◓` — painted as rounded rects anchored to a cell-centered **square** of side `min(cell_w, cell_h) * 0.55` so dots stay round regardless of cell aspect ratio. `○` stays as a glyph (no outline primitive).
+
+Also: `rect_h` in `layout_tui` is `(next_row_y - row_y) + 1.0` (gap-to-next-row plus 1 px overlap), matching how `rect_w` uses `+1.0` — prevents sub-pixel black seams between cells at fractional `cell_h`.
+
+## PTY Environment
+
+`PtySession::spawn_sized` sets these env vars on the child shell — keep them matching a known-good terminal profile so capability-sniffing TUIs pick their best glyph set:
+- `TERM=xterm-256color`, `COLORTERM=truecolor`
+- `TERM_PROGRAM=iTerm.app`, `LC_TERMINAL=iTerm2`, `LC_TERMINAL_VERSION=3.5.0` — spoofed because some TUIs have a hardcoded allow-list of "supported" terminals (tested: `Beyond` and `ghostty` are not on claude-code's list).
+- `ZDOTDIR`, `BEYONDER_SESSION_ID`
+
+Debug: set `BEYONDER_PTY_LOG=/tmp/pty.log` to dump all raw PTY bytes (escaped) — useful for diagnosing glyph/escape-sequence mismatches without fighting stderr buffering.
+
 ## Conventions
 
 - Use the existing `beyonder-core` IDs (`BlockId`, `AgentId`, `SessionId`) — all ULID-backed. Don't invent new ID types.

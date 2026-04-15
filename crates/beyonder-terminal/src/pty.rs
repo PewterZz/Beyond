@@ -82,7 +82,12 @@ impl PtySession {
 
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env("TERM_PROGRAM", "Beyond");
+        // Spoof as iTerm.app so claude-code (and other capability-sniffing TUIs)
+        // pick their nicer Unicode glyphs. Also set LC_TERMINAL — iTerm's native
+        // apps use this as a secondary signal and claude-code checks both.
+        cmd.env("TERM_PROGRAM", "iTerm.app");
+        cmd.env("LC_TERMINAL", "iTerm2");
+        cmd.env("LC_TERMINAL_VERSION", "3.5.0");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
         cmd.env("ZDOTDIR", &zdotdir);
         cmd.env("BEYONDER_SESSION_ID", &session_id.0);

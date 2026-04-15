@@ -115,6 +115,9 @@ impl BlockBuilder {
                         OscMarker::PromptStart => {
                             self.state = BuildState::AtPrompt;
                         }
+                        OscMarker::Cwd(path) => {
+                            self.cwd = PathBuf::from(path);
+                        }
                     }
                     i += consumed;
                     continue;
@@ -186,6 +189,7 @@ enum OscMarker {
     CmdText(String),
     CmdEnd(i32),
     PromptStart,
+    Cwd(String),
 }
 
 /// Parse an OSC 633 sequence starting at `bytes[0]`.
@@ -213,6 +217,10 @@ fn parse_osc_633(bytes: &[u8]) -> Option<(OscMarker, usize, &[u8])> {
             let code_str = String::from_utf8_lossy(&payload[2..]);
             let code: i32 = code_str.trim().parse().unwrap_or(0);
             Some((OscMarker::CmdEnd(code), consumed, payload))
+        }
+        _ if payload.starts_with(b"P;Cwd=") => {
+            let path = String::from_utf8_lossy(&payload[6..]).to_string();
+            Some((OscMarker::Cwd(path), consumed, payload))
         }
         _ => None,
     }

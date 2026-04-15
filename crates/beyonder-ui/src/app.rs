@@ -84,6 +84,91 @@ fn fetch_node_versions() -> Vec<String> {
     }
 }
 
+fn longest_common_prefix(items: &[&str]) -> String {
+    if items.is_empty() { return String::new(); }
+    let mut prefix = items[0].to_string();
+    for s in &items[1..] {
+        let mut new_len = 0;
+        for ((i, a), b) in prefix.char_indices().zip(s.chars()) {
+            if a == b { new_len = i + a.len_utf8(); } else { break; }
+        }
+        prefix.truncate(new_len);
+        if prefix.is_empty() { break; }
+    }
+    prefix
+}
+
+/// File-path completion. Returns candidates with `/` appended for directories.
+/// Each candidate is the full token text (including dir prefix) so the caller can
+/// drop it straight in. `~` is expanded against `$HOME`.
+fn path_completions(token: &str, cwd: &std::path::Path) -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    // Split token into directory portion and final-component prefix.
+    let (dir_part, prefix) = match token.rfind('/') {
+        Some(i) => (&token[..=i], &token[i + 1..]),
+        None => ("", token),
+    };
+    // Resolve dir_part to a real filesystem path for reading.
+    let resolved_dir: std::path::PathBuf = if dir_part.is_empty() {
+        cwd.to_path_buf()
+    } else if let Some(rest) = dir_part.strip_prefix("~/") {
+        std::path::PathBuf::from(&home).join(rest)
+    } else if dir_part == "~/" || dir_part == "~" {
+        std::path::PathBuf::from(&home)
+    } else if dir_part.starts_with('/') {
+        std::path::PathBuf::from(dir_part)
+    } else {
+        cwd.join(dir_part)
+    };
+
+    let entries = match std::fs::read_dir(&resolved_dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+    let show_hidden = prefix.starts_with('.');
+    let mut out: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            if !show_hidden && name.starts_with('.') { return None; }
+            if !name.starts_with(prefix) { return None; }
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let suffix = if is_dir { "/" } else { "" };
+            Some(format!("{dir_part}{name}{suffix}"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Command completion: scan `$PATH` for executables starting with `prefix`.
+fn command_completions(prefix: &str) -> Vec<String> {
+    if prefix.is_empty() { return vec![]; }
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for dir in path_var.split(':').filter(|s| !s.is_empty()) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for e in entries.flatten() {
+            if let Ok(name) = e.file_name().into_string() {
+                if name.starts_with(prefix) {
+                    // Only include executables (best-effort: any file with x bit on unix).
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let exec = e.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false);
+                        if !exec { continue; }
+                    }
+                    seen.insert(name);
+                }
+            }
+        }
+    }
+    seen.into_iter().collect()
+}
+
 fn child_dirs(cwd: &std::path::Path) -> Vec<String> {
     if let Ok(entries) = std::fs::read_dir(cwd) {
         let mut dirs: Vec<String> = entries
@@ -193,6 +278,17 @@ fn format_blocks_as_context(blocks: &[Block], watermark: usize) -> String {
 }
 
 
+/// Persistent state for Tab-cycle completion.
+#[derive(Debug, Clone)]
+struct CompletionCycle {
+    /// Byte offset where the completed token begins in `input.text`.
+    token_start: usize,
+    /// All candidates that share the user's original prefix.
+    candidates: Vec<String>,
+    /// Currently displayed candidate index (None ⇒ we only inserted the LCP, haven't started cycling yet).
+    index: Option<usize>,
+}
+
 /// User-selected input routing mode shown in the bottom-left pill.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppMode {
@@ -208,7 +304,7 @@ impl AppMode {
     fn label(&self) -> &'static str {
         match self {
             AppMode::Auto => "auto",
-            AppMode::Cmd => "cmd",
+            AppMode::Cmd => "shell",
             AppMode::Agent => "agent",
         }
     }
@@ -260,6 +356,8 @@ pub struct App {
     pub command_running: bool,
     /// Previous TUI active state — used to detect transitions and resize PTY.
     prev_tui_active: bool,
+    /// Sub-line accumulator for smooth mouse-wheel scrolling in TUI mode.
+    scroll_accum: f32,
 
     // Context pill state
     pub conda_envs: Vec<String>,
@@ -277,6 +375,9 @@ pub struct App {
     pub active_provider: String,
     /// Current input routing mode (shown as bottom-left pill).
     pub app_mode: AppMode,
+    /// Tab-completion cycle state. Set when the user has multiple matching candidates;
+    /// repeated Tab cycles through them. Any non-Tab keystroke clears this.
+    completion_cycle: Option<CompletionCycle>,
     /// Set to true by /quit or /exit — checked by the event loop.
     pub should_quit: bool,
     /// In Auto mode, if a shell command exits with code 127, route it to the agent instead.
@@ -370,6 +471,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             command_running: false,
             prev_tui_active: false,
+            scroll_accum: 0.0,
             current_conda: current_conda_env(),
             current_node: current_node_version(),
             conda_envs: fetch_conda_envs(),
@@ -379,6 +481,7 @@ impl App {
             active_model,
             active_provider,
             app_mode: AppMode::Auto,
+            completion_cycle: None,
             should_quit: false,
             pending_agent_fallback: None,
             agent_context_watermark: 0,
@@ -577,7 +680,10 @@ impl App {
                 self.renderer.resize(size.width, size.height);
                 // Use full-window dimensions when a TUI app is active (bar is hidden),
                 // above-bar dimensions otherwise.
-                let (cols, rows) = if self.term_grid.tui_active() {
+                let interactive_cli = self.block_builder.running_command_name()
+                    .map(|name| matches!(name, "claude" | "claude-code"))
+                    .unwrap_or(false);
+                let (cols, rows) = if self.term_grid.tui_active() || interactive_cli {
                     self.renderer.tui_grid_size()
                 } else {
                     self.renderer.terminal_grid_size()
@@ -620,10 +726,35 @@ impl App {
                 self.should_quit
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let scroll = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => -y * 20.0,
-                    MouseScrollDelta::PixelDelta(pos) => -pos.y as f32,
+                // Accumulate sub-line deltas (macOS trackpads send many small
+                // PixelDelta events per gesture) so small scrolls aren't lost
+                // to rounding. Cell height ≈ font_size * scale.
+                let (_, cell_h) = self.renderer.terminal_cell_size();
+                let (line_mul, px_div) = (1.0f32, cell_h.max(1.0));
+                let lines_up: f32 = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y * line_mul,
+                    MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / px_div,
                 };
+                self.scroll_accum += lines_up;
+                // In a full-screen TUI (claude, nvim, etc.) blocks don't scroll.
+                // Move the terminal's display_offset so the user can scroll back
+                // through the primary-screen history. No-op in alt-screen apps
+                // since they keep no scrollback — their grid history_size is 0.
+                if self.renderer.tui_active {
+                    let step = self.scroll_accum.trunc() as i32;
+                    if step != 0 {
+                        self.scroll_accum -= step as f32;
+                        self.term_grid.scroll_display(step);
+                        // Re-read the grid immediately so the next frame reflects
+                        // the new display_offset — tui_cells is otherwise only
+                        // refreshed on PTY output.
+                        self.renderer.tui_cells = self.term_grid.cell_grid();
+                        self.renderer.tui_cursor = self.term_grid.cursor_pos();
+                    }
+                    return false;
+                }
+                self.scroll_accum = 0.0;
+                let scroll = -lines_up * 20.0;
                 // If cursor is over the input bar, scroll the input text; otherwise scroll blocks.
                 let win_h = self.renderer.surface_size().1;
                 let bar_top = win_h - self.renderer.bar_height_phys();
@@ -923,6 +1054,10 @@ impl App {
         if event.state != ElementState::Pressed {
             return;
         }
+        // Any non-Tab keypress invalidates the active completion cycle.
+        if !matches!(event.logical_key, Key::Named(NamedKey::Tab)) {
+            self.completion_cycle = None;
+        }
 
         // Cmd+V (macOS) / Ctrl+V (other) — paste from clipboard.
         // Handled before TUI forwarding so it works in both the input box and
@@ -976,6 +1111,12 @@ impl App {
         // Covers both alt-screen TUIs (vim, htop) and raw-mode apps (claude, React Ink).
         if self.term_grid.tui_active() || self.block_builder.is_running_command() {
             if let Some(bytes) = self.key_to_pty_bytes(event) {
+                // Any keypress snaps the view back to the live screen — matches
+                // xterm/iTerm behaviour where typing cancels scrollback.
+                self.term_grid.scroll_to_bottom();
+                if matches!(event.logical_key, Key::Named(NamedKey::Enter)) {
+                    self.renderer.viewport.scroll_to_bottom();
+                }
                 if let Some(pty) = &mut self.pty {
                     let _ = pty.write(&bytes);
                 }
@@ -1051,20 +1192,21 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Tab) => {
-                // Shift+Tab cycles mode: Auto → Agent → Cmd → Auto (backwards).
-                // Plain Tab cycles forward: Auto → Cmd → Agent → Auto.
                 if self.modifiers.shift_key() {
-                    self.app_mode = match self.app_mode {
-                        AppMode::Auto  => AppMode::Agent,
-                        AppMode::Agent => AppMode::Cmd,
-                        AppMode::Cmd   => AppMode::Auto,
-                    };
+                    // Shift+Tab during an active cycle steps backwards through candidates.
+                    // Otherwise, cycles input mode forward: Auto → Cmd → Agent → Auto.
+                    if self.completion_cycle.is_some() {
+                        self.try_autocomplete_step(true);
+                    } else {
+                        self.app_mode = match self.app_mode {
+                            AppMode::Auto  => AppMode::Cmd,
+                            AppMode::Cmd   => AppMode::Agent,
+                            AppMode::Agent => AppMode::Auto,
+                        };
+                    }
                 } else {
-                    self.app_mode = match self.app_mode {
-                        AppMode::Auto  => AppMode::Cmd,
-                        AppMode::Cmd   => AppMode::Agent,
-                        AppMode::Agent => AppMode::Auto,
-                    };
+                    // Plain Tab: autocomplete the current input.
+                    self.try_autocomplete_step(false);
                 }
             }
             Key::Named(NamedKey::Backspace) => {
@@ -1118,6 +1260,12 @@ impl App {
     }
 
     async fn route_input(&mut self, text: String) {
+        // Bare `exit` / `quit` quits the app (matches shell intuition).
+        let trimmed = text.trim();
+        if trimmed == "exit" || trimmed == "quit" {
+            self.should_quit = true;
+            return;
+        }
         // Slash commands always work regardless of mode.
         if let InputMode::Command { .. } = detect_mode(&text) {
             return self.handle_command(&text).await;
@@ -1141,6 +1289,159 @@ impl App {
         }
     }
 
+    /// Tab handler. If a completion cycle is already active, step to the next
+    /// (or previous, for `reverse`) candidate. Otherwise, start fresh: try slash
+    /// command, agent mention, then shell-style completion.
+    fn try_autocomplete_step(&mut self, reverse: bool) {
+        if let Some(cycle) = self.completion_cycle.clone() {
+            self.advance_cycle(cycle, reverse);
+            return;
+        }
+        self.try_autocomplete();
+    }
+
+    /// Replace the cycle's token with the next/previous candidate and persist state.
+    fn advance_cycle(&mut self, mut cycle: CompletionCycle, reverse: bool) {
+        if cycle.candidates.is_empty() { return; }
+        let n = cycle.candidates.len();
+        let next = match cycle.index {
+            None => if reverse { n - 1 } else { 0 },
+            Some(i) => if reverse { (i + n - 1) % n } else { (i + 1) % n },
+        };
+        cycle.index = Some(next);
+        let replacement = cycle.candidates[next].clone();
+        // Splice replacement in place of whatever is between token_start and current cursor.
+        let cursor = self.input.cursor.min(self.input.text.len());
+        let token_start = cycle.token_start.min(self.input.text.len());
+        if cursor < token_start { return; }
+        let mut new_text = String::with_capacity(self.input.text.len() + replacement.len());
+        new_text.push_str(&self.input.text[..token_start]);
+        new_text.push_str(&replacement);
+        new_text.push_str(&self.input.text[cursor..]);
+        self.input.text = new_text;
+        self.input.cursor = token_start + replacement.len();
+        self.completion_cycle = Some(cycle);
+        self.renderer.snap_input_scroll_to_cursor();
+    }
+
+    /// Tab autocomplete: slash commands (/clea → /clear), agent mentions (@oll → @ollama).
+    /// Single match → complete + trailing space; multiple matches → extend to longest common prefix.
+    fn try_autocomplete(&mut self) {
+        let text = self.input.text.clone();
+        if let Some(rest) = text.strip_prefix('/') {
+            let token: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
+            if token.len() != rest.len() { return; } // already past the command word
+            let matches = commands::filter(&token);
+            if matches.is_empty() { return; }
+            let names: Vec<&str> = matches.iter().map(|c| c.name).collect();
+            let lcp = longest_common_prefix(&names);
+            if matches.len() == 1 {
+                self.input.text = format!("/{} ", names[0]);
+            } else if lcp.len() > token.len() {
+                self.input.text = format!("/{lcp}");
+            } else {
+                return;
+            }
+            self.input.cursor = self.input.text.len();
+            self.renderer.snap_input_scroll_to_cursor();
+            return;
+        }
+        if let Some(rest) = text.strip_prefix('@') {
+            let token: String = rest.chars().take_while(|c| !c.is_whitespace()).collect();
+            if token.len() != rest.len() { return; }
+            let agents = self.supervisor.list_agents();
+            let names: Vec<String> = agents
+                .into_iter()
+                .map(|a| a.name.clone())
+                .filter(|n| n.starts_with(&token))
+                .collect();
+            if names.is_empty() { return; }
+            let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            let lcp = longest_common_prefix(&refs);
+            if names.len() == 1 {
+                self.input.text = format!("@{} ", names[0]);
+            } else if lcp.len() > token.len() {
+                self.input.text = format!("@{lcp}");
+            } else {
+                return;
+            }
+            self.input.cursor = self.input.text.len();
+            self.renderer.snap_input_scroll_to_cursor();
+            return;
+        }
+        // Shell-style completion: complete the token at the cursor as a path or command.
+        self.shell_autocomplete();
+    }
+
+    /// File-path / command completion at the token under the cursor.
+    /// Mirrors what zsh/bash do for the most common case: command in command position,
+    /// path elsewhere. Multi-match extends to the longest common prefix; single match
+    /// appends `/` for dirs or ` ` for files/commands.
+    fn shell_autocomplete(&mut self) {
+        let text = self.input.text.clone();
+        let cursor = self.input.cursor.min(text.len());
+        let token_start = text[..cursor]
+            .rfind(|c: char| c.is_whitespace() || matches!(c, '|' | ';' | '&' | '`' | '$' | '(' | '<' | '>'))
+            .map(|i| i + text[i..].chars().next().unwrap().len_utf8())
+            .unwrap_or(0);
+        let token = &text[token_start..cursor];
+        let prior = &text[..token_start];
+        let is_command_pos = prior.trim().is_empty()
+            || prior.trim_end().ends_with(|c: char| matches!(c, '|' | ';' | '&'));
+
+        let cwd = self.block_builder.cwd.clone();
+        let candidates: Vec<String> =
+            if !token.starts_with('~') && !token.starts_with('/') && !token.contains('/') && is_command_pos {
+                command_completions(token)
+            } else {
+                path_completions(token, &cwd)
+            };
+
+        if candidates.is_empty() { return; }
+        let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+        let lcp = longest_common_prefix(&refs);
+
+        if candidates.len() == 1 {
+            let only = &candidates[0];
+            let replacement = if only.ends_with('/') { only.clone() } else { format!("{only} ") };
+            self.splice_at(token_start, cursor, &replacement);
+            return;
+        }
+
+        // Multiple matches.
+        if lcp.len() > token.len() {
+            // Extend to LCP first; arm cycle so the next Tab steps through full candidates.
+            self.splice_at(token_start, cursor, &lcp);
+            self.completion_cycle = Some(CompletionCycle {
+                token_start,
+                candidates,
+                index: None,
+            });
+        } else {
+            // LCP didn't advance — start cycling immediately on this Tab.
+            let first = candidates[0].clone();
+            self.splice_at(token_start, cursor, &first);
+            self.completion_cycle = Some(CompletionCycle {
+                token_start,
+                candidates,
+                index: Some(0),
+            });
+        }
+    }
+
+    /// Replace text[from..to] with `replacement` and place the cursor at the end of it.
+    fn splice_at(&mut self, from: usize, to: usize, replacement: &str) {
+        let to = to.min(self.input.text.len());
+        if from > to { return; }
+        let mut new_text = String::with_capacity(self.input.text.len() + replacement.len());
+        new_text.push_str(&self.input.text[..from]);
+        new_text.push_str(replacement);
+        new_text.push_str(&self.input.text[to..]);
+        self.input.text = new_text;
+        self.input.cursor = from + replacement.len();
+        self.renderer.snap_input_scroll_to_cursor();
+    }
+
     /// Route text directly to the active LLM (used in Agent mode).
     async fn prompt_active_llm(&mut self, text: String) {
         let name = self.active_provider.clone();
@@ -1155,6 +1456,7 @@ impl App {
                 error!("PTY write error: {e}");
             }
         }
+        self.renderer.viewport.scroll_to_bottom();
     }
 
     async fn prompt_agent(&mut self, name: &str, prompt: String) {
@@ -1343,7 +1645,7 @@ impl App {
             }
             ["/mode", mode_name] => {
                 self.app_mode = match *mode_name {
-                    "cmd" => AppMode::Cmd,
+                    "cmd" | "shell" => AppMode::Cmd,
                     "agent" => AppMode::Agent,
                     _ => AppMode::Auto,
                 };
@@ -1498,7 +1800,13 @@ impl App {
 
         // Detect TUI active/inactive transitions and resize PTY so the app
         // gets the correct grid dimensions (full window vs. above-bar).
-        let tui_now = self.term_grid.tui_active();
+        // Treat name-detected interactive CLIs (claude) the same as alt-screen
+        // TUIs — the renderer hides the input bar for them, so the PTY should
+        // own the full window too.
+        let interactive_cli = self.block_builder.running_command_name()
+            .map(|name| matches!(name, "claude" | "claude-code"))
+            .unwrap_or(false);
+        let tui_now = self.term_grid.tui_active() || interactive_cli;
         if tui_now != self.prev_tui_active {
             self.prev_tui_active = tui_now;
             let (cols, rows) = if tui_now {
