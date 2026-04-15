@@ -181,15 +181,24 @@ impl Default for ShellConfig {
     }
 }
 
+/// Base directory for all Beyonder state. Pinned to `$HOME/.config/beyond` on
+/// every platform (rather than macOS's `~/Library/Application Support`) so users
+/// have a single, predictable place for configs, the SQLite store, logs, etc.
+/// Honours `$XDG_CONFIG_HOME` if set.
+pub fn beyonder_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("beyond");
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".config").join("beyond")
+}
+
 fn config_path() -> PathBuf {
-    dirs_next::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("beyonder")
-        .join("config.toml")
+    beyonder_dir().join("config.toml")
 }
 
 fn default_data_dir() -> PathBuf {
-    dirs_next::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("beyonder")
+    beyonder_dir().join("data")
 }

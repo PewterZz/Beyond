@@ -28,6 +28,9 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> StoreResult<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         let store = Self { conn };

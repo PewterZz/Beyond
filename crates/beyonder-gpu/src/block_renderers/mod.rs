@@ -97,7 +97,7 @@ pub fn measure_block_height(block: &Block, width: f32, font_size: f32) -> f32 {
         }
         BlockContent::Text { text } => {
             let lines = text.lines().count().max(1) as f32;
-            header_h + lines * line_h + v_pad
+            v_pad + lines * line_h + v_pad
         }
         _ => font_size * 6.0,
     }

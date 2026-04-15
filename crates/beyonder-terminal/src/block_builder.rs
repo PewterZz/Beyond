@@ -61,6 +61,68 @@ impl BlockBuilder {
         let mut i = 0;
 
         while i < bytes.len() {
+            // OSC 133 — FinalTerm standard. Carries less info than 633, so it acts
+            // as a fallback when 633 isn't present. Repeated transitions are no-ops
+            // because the state machine has already advanced.
+            if bytes[i..].starts_with(b"\x1b]133;") {
+                if let Some((marker, consumed)) = parse_osc_133(&bytes[i..]) {
+                    match marker {
+                        Osc133Marker::PromptStart => {
+                            self.state = BuildState::AtPrompt;
+                        }
+                        Osc133Marker::CmdExecStart => {
+                            // 133;C means "command output begins" — no command text.
+                            // If 633;E hasn't already kicked us into RunningCommand,
+                            // start with an unknown command string.
+                            if matches!(self.state, BuildState::AtPrompt) {
+                                let id = BlockId::new();
+                                self.pending_block_id = Some(id.clone());
+                                let mut block = Block::new(
+                                    BlockKind::Human,
+                                    self.session_id.clone(),
+                                    BlockContent::ShellCommand {
+                                        input: String::new(),
+                                        output: TerminalOutput { rows: vec![] },
+                                        exit_code: None,
+                                        cwd: self.cwd.clone(),
+                                        duration_ms: None,
+                                    },
+                                );
+                                block.id = id;
+                                block.status = BlockStatus::Running;
+                                self.state = BuildState::RunningCommand {
+                                    command: String::new(),
+                                    output_bytes: vec![],
+                                    started_at: Instant::now(),
+                                };
+                                events.push(BuildEvent::Block(block));
+                            }
+                        }
+                        Osc133Marker::CmdEnd(code) => {
+                            if let BuildState::RunningCommand {
+                                command, output_bytes, started_at,
+                            } = std::mem::replace(&mut self.state, BuildState::AtPrompt) {
+                                let duration_ms = started_at.elapsed().as_millis() as u64;
+                                let output = parse_ansi_output(&output_bytes, self.grid_cols, self.grid_rows);
+                                let content = BlockContent::ShellCommand {
+                                    input: command,
+                                    output,
+                                    exit_code: Some(code),
+                                    cwd: self.cwd.clone(),
+                                    duration_ms: Some(duration_ms),
+                                };
+                                if let Some(id) = self.pending_block_id.take() {
+                                    events.push(BuildEvent::LiveUpdate { block_id: id, content });
+                                }
+                            }
+                        }
+                        Osc133Marker::CmdLineReady => {} // ignored — between prompt and exec
+                    }
+                    i += consumed;
+                    continue;
+                }
+            }
+
             // Check for OSC marker sequences.
             if bytes[i..].starts_with(b"\x1b]633;") {
                 if let Some((marker, consumed, _payload)) = parse_osc_633(&bytes[i..]) {
@@ -181,6 +243,35 @@ impl BlockBuilder {
         }
         None
     }
+}
+
+#[derive(Debug)]
+enum Osc133Marker {
+    PromptStart,
+    CmdLineReady,
+    CmdExecStart,
+    CmdEnd(i32),
+}
+
+fn parse_osc_133(bytes: &[u8]) -> Option<(Osc133Marker, usize)> {
+    let prefix = b"\x1b]133;";
+    if !bytes.starts_with(prefix) { return None; }
+    let rest = &bytes[prefix.len()..];
+    let end = rest.iter().position(|&b| b == markers::BEL || b == b'\x1b')?;
+    let payload = &rest[..end];
+    let consumed = prefix.len() + end + 1;
+    let marker = match payload {
+        b"A" => Osc133Marker::PromptStart,
+        b"B" => Osc133Marker::CmdLineReady,
+        b"C" => Osc133Marker::CmdExecStart,
+        _ if payload == b"D" => Osc133Marker::CmdEnd(0),
+        _ if payload.starts_with(b"D;") => {
+            let code = String::from_utf8_lossy(&payload[2..]).trim().parse().unwrap_or(0);
+            Osc133Marker::CmdEnd(code)
+        }
+        _ => return None,
+    };
+    Some((marker, consumed))
 }
 
 #[derive(Debug)]

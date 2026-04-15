@@ -56,29 +56,76 @@ impl PtySession {
             })
             .context("Failed to open PTY")?;
 
-        // Write Beyonder shell integration to a temp ZDOTDIR so it's sourced
-        // automatically when zsh starts, without overriding the user's config.
         let home = std::env::var("HOME").unwrap_or_default();
-        let zdotdir = std::env::temp_dir().join(format!("beyonder_{}", &session_id.0));
-        std::fs::create_dir_all(&zdotdir).ok();
+        let session_dir = std::env::temp_dir().join(format!("beyonder_{}", &session_id.0));
+        std::fs::create_dir_all(&session_dir).ok();
 
-        // .zshenv is always sourced — forward the real one, then source .zprofile
-        // so PATH includes binaries installed via npm/nvm/brew etc.
-        let zshenv = format!(
-            "[ -f {home}/.zshenv ] && source {home}/.zshenv\n\
-             [ -f {home}/.zprofile ] && source {home}/.zprofile\n"
-        );
-        std::fs::write(zdotdir.join(".zshenv"), zshenv).ok();
-
-        // .zshrc: Beyonder hooks first, then the user's real .zshrc.
-        use crate::shell_hooks::zsh_init_script;
-        let hooks = zsh_init_script(&session_id.0);
-        let zshrc = format!("{hooks}\n[ -f {home}/.zshrc ] && source {home}/.zshrc\n");
-        std::fs::write(zdotdir.join(".zshrc"), zshrc).ok();
-
+        let kind = crate::shell_hooks::detect_shell_kind(shell);
         let mut cmd = CommandBuilder::new(shell);
-        cmd.args(&["-i"]); // force interactive mode so .zshrc is sourced
         cmd.cwd(cwd);
+
+        match kind {
+            crate::shell_hooks::ShellKind::Zsh => {
+                // Temp ZDOTDIR overlay: our .zshenv / .zshrc forward to the user's,
+                // then inject hooks. Doesn't touch the user's real config.
+                let zshenv = format!(
+                    "[ -f {home}/.zshenv ] && source {home}/.zshenv\n\
+                     [ -f {home}/.zprofile ] && source {home}/.zprofile\n"
+                );
+                std::fs::write(session_dir.join(".zshenv"), zshenv).ok();
+                let hooks = crate::shell_hooks::zsh_init_script(&session_id.0);
+                let zshrc = format!("{hooks}\n[ -f {home}/.zshrc ] && source {home}/.zshrc\n");
+                std::fs::write(session_dir.join(".zshrc"), zshrc).ok();
+                cmd.env("ZDOTDIR", &session_dir);
+                cmd.args(&["-i"]);
+            }
+            crate::shell_hooks::ShellKind::Bash => {
+                // --rcfile overrides ~/.bashrc — source the real one first.
+                let rcfile = session_dir.join("init.bashrc");
+                let user_rc = format!("[ -f {home}/.bashrc ] && source {home}/.bashrc\n");
+                let hooks = crate::shell_hooks::bash_init_script(&session_id.0);
+                std::fs::write(&rcfile, format!("{user_rc}\n{hooks}")).ok();
+                cmd.args(&["--rcfile", rcfile.to_str().unwrap_or(""), "-i"]);
+            }
+            crate::shell_hooks::ShellKind::Fish => {
+                // --init-command runs in addition to user config; no overlay needed.
+                let initf = session_dir.join("beyonder.fish");
+                std::fs::write(&initf, crate::shell_hooks::fish_init_script(&session_id.0)).ok();
+                let src_cmd = format!("source {}", initf.display());
+                cmd.args(&["--init-command", &src_cmd, "-i"]);
+            }
+            crate::shell_hooks::ShellKind::Nushell => {
+                // Override --config / --env-config with files that source the
+                // user's real config first, then layer our hooks on top.
+                let nu_dir = std::path::PathBuf::from(&home).join(".config").join("nushell");
+                let user_cfg = nu_dir.join("config.nu");
+                let user_env = nu_dir.join("env.nu");
+
+                let env_path = session_dir.join("env.nu");
+                let env_body = if user_env.exists() {
+                    format!("source {}\n", user_env.display())
+                } else {
+                    String::new()
+                };
+                std::fs::write(&env_path, env_body).ok();
+
+                let cfg_path = session_dir.join("config.nu");
+                let user_cfg_src = if user_cfg.exists() {
+                    format!("source {}\n", user_cfg.display())
+                } else {
+                    String::new()
+                };
+                let hooks = crate::shell_hooks::nushell_init_script(&session_id.0);
+                std::fs::write(&cfg_path, format!("{user_cfg_src}\n{hooks}")).ok();
+                cmd.args(&[
+                    "--config", cfg_path.to_str().unwrap_or(""),
+                    "--env-config", env_path.to_str().unwrap_or(""),
+                ]);
+            }
+            crate::shell_hooks::ShellKind::Unknown => {
+                cmd.args(&["-i"]);
+            }
+        }
 
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
@@ -89,7 +136,6 @@ impl PtySession {
         cmd.env("LC_TERMINAL", "iTerm2");
         cmd.env("LC_TERMINAL_VERSION", "3.5.0");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        cmd.env("ZDOTDIR", &zdotdir);
         cmd.env("BEYONDER_SESSION_ID", &session_id.0);
         for (k, v) in extra_env {
             cmd.env(k, v);

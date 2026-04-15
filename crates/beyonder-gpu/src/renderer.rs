@@ -1299,9 +1299,17 @@ impl Renderer {
                 // Layout constants (physical px).
                 let is_shell = matches!(block.content, BlockContent::ShellCommand { .. });
                 let is_agent = matches!(block.content, BlockContent::AgentMessage { .. });
-                // Agent messages have no header bar — content starts with padding only.
-                let cmd_bar_h = if is_shell { phys_font * 2.8 } else if is_agent { 0.0 } else { phys_font * 1.6 };
-                let inner_gap = if is_agent { phys_font * 0.6 } else { phys_font * 0.4 };
+                let is_plain_text = matches!(block.content, BlockContent::Text { .. });
+                // Agent messages and plain text blocks have no header bar — they're
+                // raw content (e.g. /help output) and a header would just duplicate the body.
+                let cmd_bar_h = if is_shell {
+                    phys_font * 2.8
+                } else if is_agent || is_plain_text {
+                    0.0
+                } else {
+                    phys_font * 1.6
+                };
+                let inner_gap = if is_agent || is_plain_text { phys_font * 0.6 } else { phys_font * 0.4 };
                 let hdr_pad = 10.0 * sc;
                 let content_pad = 8.0 * sc;
 
@@ -1331,8 +1339,8 @@ impl Renderer {
                     let cmd_color = GlyphColor::rgb(205, 214, 244); // Text
                     let cmd_buf = self.make_buffer(input, content_w - hdr_pad * 2.0, phys_font, cmd_color);
                     results.push((cmd_buf, x + hdr_pad, cmd_text_y, content_w - hdr_pad * 2.0, phys_font * 1.4, cmd_color));
-                } else if !is_agent {
-                    // Non-shell, non-agent blocks: single centered header line.
+                } else if !is_agent && !is_plain_text {
+                    // Non-shell, non-agent, non-text blocks: single centered header line.
                     let raw_label = block_header_label(block);
                     // Only output-bearing ToolCall blocks get a collapse chevron.
                     let has_tool_output = matches!(&block.content,
@@ -2211,6 +2219,7 @@ fn block_content_text(block: &Block) -> String {
                 String::new()
             }
         }
+        BlockContent::Text { text } => text.clone(),
         _ => String::new(),
     }
 }
