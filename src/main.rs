@@ -135,11 +135,11 @@ impl ApplicationHandler<()> for BeyonderHandler {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
-            // While actively producing frames, use a short poll so streaming
-            // content stays smooth (~120fps cap).
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                std::time::Instant::now() + std::time::Duration::from_millis(8),
-            ));
+            // wgpu PresentMode::Fifo provides VSync-locked frame pacing, so we
+            // use Poll (re-enter immediately) and let render()'s
+            // get_current_texture() block until the next display refresh. This
+            // gives us exact VSync alignment with zero manual timer overhead.
+            event_loop.set_control_flow(ControlFlow::Poll);
         } else {
             // Nothing changed — sleep until the next winit/user event or
             // until an async source wakes us via EventLoopProxy.
