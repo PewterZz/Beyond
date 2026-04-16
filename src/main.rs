@@ -68,9 +68,20 @@ impl ApplicationHandler<()> for BeyonderHandler {
             return;
         }
 
+        // `BEYONDER_WINDOW_SIZE=WxH` lets a parent process open a compact popup
+        // for single-purpose child windows (e.g. "click file link → small nvim
+        // window"). Malformed values are ignored.
+        let (win_w, win_h) = std::env::var("BEYONDER_WINDOW_SIZE")
+            .ok()
+            .and_then(|s| {
+                let (w, h) = s.split_once('x')?;
+                Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
+            })
+            .unwrap_or((1280, 800));
+
         let mut window_attrs = WindowAttributes::default()
             .with_title("Beyond")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 800u32))
+            .with_inner_size(winit::dpi::LogicalSize::new(win_w, win_h))
             .with_resizable(true);
 
         if let Some(icon) = load_winit_icon() {

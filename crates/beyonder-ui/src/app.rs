@@ -101,114 +101,38 @@ fn find_editor() -> Option<String> {
     None
 }
 
-/// Spawn a small separate terminal window running `editor <path>`.
-/// Returns the name of the terminal emulator that was launched.
+/// Spawn a *separate beyondtty window* — a new OS process running this same
+/// binary — pre-loaded to run `editor <path>` inside a compact window.
 ///
-/// Tries terminals in order of preference (compact sizing flags where
-/// supported, so the window lands as a small popup rather than 80×24
-/// or maximized).
+/// The child reads `BEYONDER_WINDOW_SIZE` for its initial dimensions and
+/// `BEYONDER_INITIAL_CMD` for the command to run in its first tab's shell;
+/// both env vars are consumed and cleared on the child side so they don't
+/// leak into sub-shells or new tabs.
 fn spawn_editor_window(editor: &str, path: &std::path::Path) -> anyhow::Result<&'static str> {
     use std::process::{Command, Stdio};
 
-    // Reasonable "small popup" dimensions.
-    const COLS: u32 = 110;
-    const ROWS: u32 = 34;
+    // Compact-popup dimensions (logical px). 900×600 gives ~100×30 cells at
+    // the default font; small enough to feel like a popup, big enough for
+    // a real editing session.
     const WIN_W: u32 = 900;
     const WIN_H: u32 = 600;
 
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("could not resolve current executable: {e}"))?;
     let quoted = shell_quote(path);
-    let shell_cmd = format!("{editor} {quoted}");
+    let initial_cmd = format!("{editor} {quoted}");
 
-    // kitty: `-o KEY=VALUE` sets a runtime config value. Sizes in `Nc` are
-    // cell counts, which give a predictable popup regardless of font scale.
-    if binary_in_path("kitty") {
-        Command::new("kitty")
-            .args([
-                "-o",
-                &format!("initial_window_width={COLS}c"),
-                "-o",
-                &format!("initial_window_height={ROWS}c"),
-                "-o",
-                "remember_window_size=no",
-            ])
-            .arg(editor)
-            .arg(path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        return Ok("kitty");
-    }
+    Command::new(&exe)
+        .env("BEYONDER_WINDOW_SIZE", format!("{WIN_W}x{WIN_H}"))
+        .env("BEYONDER_INITIAL_CMD", &initial_cmd)
+        // Detach stdio so the child doesn't block on the parent's closed fds
+        // and doesn't scribble over the parent's log stream.
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
 
-    // alacritty: column/line dims via --option; -e consumes the trailing command.
-    if binary_in_path("alacritty") {
-        Command::new("alacritty")
-            .args([
-                "--option",
-                &format!("window.dimensions.columns={COLS}"),
-                "--option",
-                &format!("window.dimensions.lines={ROWS}"),
-                "-e",
-                "sh",
-                "-c",
-                &shell_cmd,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        return Ok("alacritty");
-    }
-
-    // ghostty: no reliable CLI window-size flag, but opens at its configured
-    // default which is usually reasonable. `-e` must come last; rest is argv.
-    if binary_in_path("ghostty") {
-        Command::new("ghostty")
-            .args(["-e", editor, path.to_string_lossy().as_ref()])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        return Ok("ghostty");
-    }
-
-    if binary_in_path("wezterm") {
-        Command::new("wezterm")
-            .args(["start", "--", "sh", "-c", &shell_cmd])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        return Ok("wezterm");
-    }
-
-    // macOS fallback: drive Terminal.app via AppleScript so we can size the window.
-    #[cfg(target_os = "macos")]
-    {
-        let script = format!(
-            r#"tell application "Terminal"
-                activate
-                set newTab to do script "{cmd}"
-                set bounds of front window to {{200, 200, {right}, {bottom}}}
-            end tell"#,
-            cmd = shell_cmd.replace('\\', "\\\\").replace('"', "\\\""),
-            right = 200 + WIN_W,
-            bottom = 200 + WIN_H,
-        );
-        Command::new("osascript")
-            .arg("-e")
-            .arg(&script)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        return Ok("Terminal.app");
-    }
-
-    #[allow(unreachable_code)]
-    Err(anyhow::anyhow!(
-        "no compatible terminal emulator found (tried ghostty, kitty, alacritty, wezterm)"
-    ))
+    Ok("beyondtty")
 }
 
 /// True iff `name` is an executable file in one of the directories on $PATH.
@@ -757,8 +681,25 @@ impl App {
             pty_rows,
             wake_fn,
         ) {
-            Ok(p) => {
+            Ok(mut p) => {
                 info!("Shell PTY spawned");
+                // `BEYONDER_INITIAL_CMD` lets a parent process preload a command
+                // into the first tab's shell (e.g. `nvim /path/to/file` from the
+                // file-link-click popup flow). The shell reads it once it finishes
+                // sourcing rc files and prints its prompt.
+                if let Ok(cmd) = std::env::var("BEYONDER_INITIAL_CMD") {
+                    if !cmd.trim().is_empty() {
+                        let line = format!("{}\n", cmd.trim_end_matches('\n'));
+                        if let Err(e) = p.write(line.as_bytes()) {
+                            warn!("Failed to write BEYONDER_INITIAL_CMD to PTY: {e}");
+                        }
+                    }
+                    // Consume the var so later `new_tab` shells don't repeat it.
+                    // SAFETY: called before any async task can observe env state.
+                    unsafe {
+                        std::env::remove_var("BEYONDER_INITIAL_CMD");
+                    }
+                }
                 Some(p)
             }
             Err(e) => {
