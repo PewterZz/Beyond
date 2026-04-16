@@ -17,6 +17,9 @@ pub enum PtyEvent {
     Exited(Option<u32>),
 }
 
+/// Callback invoked after each PTY event is sent, used to wake the event loop.
+pub type WakeFn = Box<dyn Fn() + Send + 'static>;
+
 /// A live PTY session connected to a shell.
 pub struct PtySession {
     pub session_id: SessionId,
@@ -45,6 +48,32 @@ impl PtySession {
         extra_env: &[(&str, &str)],
         cols: u16,
         rows: u16,
+    ) -> Result<Self> {
+        Self::spawn_sized_inner(session_id, shell, cwd, extra_env, cols, rows, None)
+    }
+
+    /// Like `spawn_sized` but calls `wake` after each PTY event to wake the
+    /// event loop (enables `ControlFlow::Wait` in the renderer).
+    pub fn spawn_sized_with_wake(
+        session_id: SessionId,
+        shell: &str,
+        cwd: &PathBuf,
+        extra_env: &[(&str, &str)],
+        cols: u16,
+        rows: u16,
+        wake: WakeFn,
+    ) -> Result<Self> {
+        Self::spawn_sized_inner(session_id, shell, cwd, extra_env, cols, rows, Some(wake))
+    }
+
+    fn spawn_sized_inner(
+        session_id: SessionId,
+        shell: &str,
+        cwd: &PathBuf,
+        extra_env: &[(&str, &str)],
+        cols: u16,
+        rows: u16,
+        wake: Option<WakeFn>,
     ) -> Result<Self> {
         info!(shell, cols, rows, "Spawning PTY session");
         let pty_system = native_pty_system();
@@ -174,6 +203,9 @@ impl PtySession {
                     Ok(0) => break,
                     Ok(n) => {
                         let _ = tx.blocking_send(PtyEvent::Output(buf[..n].to_vec()));
+                        if let Some(ref w) = wake {
+                            w();
+                        }
                     }
                     Err(_) => break,
                 }
@@ -185,6 +217,9 @@ impl PtySession {
                 .and_then(|mut c| c.wait().ok())
                 .and_then(|s| if s.success() { Some(0) } else { None });
             let _ = tx.blocking_send(PtyEvent::Exited(code));
+            if let Some(ref w) = wake {
+                w();
+            }
         });
 
         Ok(Self {
@@ -214,5 +249,77 @@ impl PtySession {
                 pixel_height: 0,
             })
             .context("Failed to resize PTY")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Verify that the wake callback fires on PTY output and on exit,
+    /// proving event-driven redraw can rely on it instead of polling.
+    #[tokio::test]
+    async fn wake_callback_fires_on_pty_output() {
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let wc = Arc::clone(&wake_count);
+        let wake: WakeFn = Box::new(move || {
+            wc.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let session_id = SessionId::new();
+        let cwd = std::env::temp_dir();
+        // Run a command that produces output then exits.
+        let mut pty =
+            PtySession::spawn_sized_with_wake(session_id, "/bin/sh", &cwd, &[], 80, 24, wake)
+                .expect("spawn PTY");
+
+        // Send a command that produces output and exits.
+        pty.write(b"echo hello && exit\n").unwrap();
+
+        // Drain events until exit.
+        let mut got_output = false;
+        let mut got_exit = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout_at(deadline, pty.event_rx.recv()).await {
+                Ok(Some(PtyEvent::Output(_))) => got_output = true,
+                Ok(Some(PtyEvent::Exited(_))) => {
+                    got_exit = true;
+                    break;
+                }
+                Ok(None) => break,
+                Err(_) => panic!("PTY test timed out"),
+            }
+        }
+
+        assert!(got_output, "should have received PTY output");
+        assert!(got_exit, "should have received PTY exit");
+        // Wake must have fired at least once for output + once for exit.
+        let wakes = wake_count.load(Ordering::SeqCst);
+        assert!(
+            wakes >= 2,
+            "wake callback should fire at least twice, got {wakes}"
+        );
+    }
+
+    /// Verify that without a wake callback, PTY still works (backward compat).
+    #[tokio::test]
+    async fn pty_works_without_wake() {
+        let session_id = SessionId::new();
+        let cwd = std::env::temp_dir();
+        let mut pty =
+            PtySession::spawn_sized(session_id, "/bin/sh", &cwd, &[], 80, 24).expect("spawn PTY");
+
+        pty.write(b"exit\n").unwrap();
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout_at(deadline, pty.event_rx.recv()).await {
+                Ok(Some(PtyEvent::Exited(_))) | Ok(None) => break,
+                Ok(Some(_)) => continue,
+                Err(_) => panic!("PTY test timed out"),
+            }
+        }
     }
 }

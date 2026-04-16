@@ -20,6 +20,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 use winit::event::{ElementState, Ime, KeyEvent, MouseScrollDelta, WindowEvent};
+use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::Window;
 
@@ -471,11 +472,17 @@ pub struct App {
     /// resize events don't clobber what the phone asked for.
     remote_pty_dims: Option<(u16, u16)>,
     remote_last_pty_frame: std::time::Instant,
+    /// Proxy to wake the winit event loop from async event sources (PTY, agent, broker).
+    event_loop_proxy: EventLoopProxy<()>,
     remote_connect_gen: u64,
 }
 
 impl App {
-    pub async fn new(window: Arc<Window>, config: BeyonderConfig) -> Result<Self> {
+    pub async fn new(
+        window: Arc<Window>,
+        config: BeyonderConfig,
+        event_loop_proxy: EventLoopProxy<()>,
+    ) -> Result<Self> {
         let mut renderer = Renderer::new(Arc::clone(&window)).await?;
         renderer.set_theme(config.resolved_theme());
         // Enable IME so winit delivers WindowEvent::Ime (preedit/commit) events.
@@ -496,7 +503,11 @@ impl App {
         let (supervisor_tx, supervisor_rx) = mpsc::unbounded_channel();
 
         let capability_broker = CapabilityBroker::new(broker_tx);
-        let supervisor = AgentSupervisor::new(supervisor_tx);
+        let mut supervisor = AgentSupervisor::new(supervisor_tx);
+        let wake_proxy_sup = event_loop_proxy.clone();
+        supervisor.set_wake(std::sync::Arc::new(move || {
+            let _ = wake_proxy_sup.send_event(());
+        }));
 
         // Calculate PTY dimensions from the renderer — single source of truth.
         let (pty_cols, pty_rows) = renderer.terminal_grid_size();
@@ -510,18 +521,28 @@ impl App {
         let shell_env = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         let shell = config.shell.program.as_deref().unwrap_or(&shell_env);
 
-        let pty =
-            match PtySession::spawn_sized(session_id.clone(), shell, &cwd, &[], pty_cols, pty_rows)
-            {
-                Ok(p) => {
-                    info!("Shell PTY spawned");
-                    Some(p)
-                }
-                Err(e) => {
-                    warn!("Failed to spawn PTY: {e}");
-                    None
-                }
-            };
+        let wake_proxy = event_loop_proxy.clone();
+        let wake_fn: beyonder_terminal::pty::WakeFn = Box::new(move || {
+            let _ = wake_proxy.send_event(());
+        });
+        let pty = match PtySession::spawn_sized_with_wake(
+            session_id.clone(),
+            shell,
+            &cwd,
+            &[],
+            pty_cols,
+            pty_rows,
+            wake_fn,
+        ) {
+            Ok(p) => {
+                info!("Shell PTY spawned");
+                Some(p)
+            }
+            Err(e) => {
+                warn!("Failed to spawn PTY: {e}");
+                None
+            }
+        };
 
         let active_model = config.model.clone();
         let active_provider = config.provider.name().to_string();
@@ -632,6 +653,7 @@ impl App {
             remote_pty_dims: None,
             remote_last_pty_frame: std::time::Instant::now(),
             remote_connect_gen: 0,
+            event_loop_proxy,
         })
     }
 
@@ -708,18 +730,28 @@ impl App {
 
         let shell_env = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
         let shell = self.config.shell.program.as_deref().unwrap_or(&shell_env);
-        let pty =
-            match PtySession::spawn_sized(session_id.clone(), shell, &cwd, &[], pty_cols, pty_rows)
-            {
-                Ok(p) => {
-                    info!("Shell PTY spawned for new tab");
-                    Some(p)
-                }
-                Err(e) => {
-                    warn!("Failed to spawn PTY for new tab: {e}");
-                    None
-                }
-            };
+        let wake_proxy = self.event_loop_proxy.clone();
+        let wake_fn: beyonder_terminal::pty::WakeFn = Box::new(move || {
+            let _ = wake_proxy.send_event(());
+        });
+        let pty = match PtySession::spawn_sized_with_wake(
+            session_id.clone(),
+            shell,
+            &cwd,
+            &[],
+            pty_cols,
+            pty_rows,
+            wake_fn,
+        ) {
+            Ok(p) => {
+                info!("Shell PTY spawned for new tab");
+                Some(p)
+            }
+            Err(e) => {
+                warn!("Failed to spawn PTY for new tab: {e}");
+                None
+            }
+        };
 
         TabState {
             session,
@@ -825,15 +857,30 @@ impl App {
     }
 
     fn build_tab_list(&self) -> beyonder_remote::TabList {
-        let tabs: Vec<beyonder_remote::TabInfo> = self.tab_titles.iter().enumerate().map(|(i, title)| {
-            let sid = if i == self.active_tab {
-                self.session.id.0.clone()
-            } else {
-                self.tabs[i].as_ref().map(|t| t.session.id.0.clone()).unwrap_or_default()
-            };
-            beyonder_remote::TabInfo { index: i, title: title.clone(), session_id: sid }
-        }).collect();
-        beyonder_remote::TabList { tabs, active: self.active_tab }
+        let tabs: Vec<beyonder_remote::TabInfo> = self
+            .tab_titles
+            .iter()
+            .enumerate()
+            .map(|(i, title)| {
+                let sid = if i == self.active_tab {
+                    self.session.id.0.clone()
+                } else {
+                    self.tabs[i]
+                        .as_ref()
+                        .map(|t| t.session.id.0.clone())
+                        .unwrap_or_default()
+                };
+                beyonder_remote::TabInfo {
+                    index: i,
+                    title: title.clone(),
+                    session_id: sid,
+                }
+            })
+            .collect();
+        beyonder_remote::TabList {
+            tabs,
+            active: self.active_tab,
+        }
     }
 
     fn broadcast_tab_list(&self) {
@@ -967,7 +1014,9 @@ impl App {
                             && (self.cursor_pos.1 - p.1).abs() <= 5.0
                     });
                     if is_double {
-                        if self.renderer.begin_text_selection(self.cursor_pos.0, self.cursor_pos.1)
+                        if self
+                            .renderer
+                            .begin_text_selection(self.cursor_pos.0, self.cursor_pos.1)
                         {
                             // Suppress block-level selection while a text range is active.
                             self.selected_block = None;
@@ -2407,12 +2456,9 @@ impl App {
                     .await
                     {
                         Ok(hub) => {
-                            let header = format!(
-                                "phone bridge started on :{}\nScan to pair:",
-                                hub.port
-                            );
-                            let footer =
-                                format!("Or enter URL manually: {}", hub.pairing_url);
+                            let header =
+                                format!("phone bridge started on :{}\nScan to pair:", hub.port);
+                            let footer = format!("Or enter URL manually: {}", hub.pairing_url);
                             let bitmap = hub.qr_bitmap.clone();
                             self.remote = Some(hub);
                             self.remote_cursor = 0;
@@ -2472,8 +2518,7 @@ impl App {
                 if let Some(hub) = self.remote.as_mut() {
                     match hub.use_ngrok().await {
                         Ok(host) => {
-                            let header =
-                                format!("phone bridge tunneled via ngrok: wss://{}", host);
+                            let header = format!("phone bridge tunneled via ngrok: wss://{}", host);
                             let footer = hub.pairing_url.clone();
                             let bitmap = hub.qr_bitmap.clone();
                             self.push_text_block(header);
@@ -2609,7 +2654,9 @@ impl App {
             agent_id: None,
             session_id: self.session.id.clone(),
             status: BlockStatus::Completed,
-            content: BlockContent::Text { text: String::new() },
+            content: BlockContent::Text {
+                text: String::new(),
+            },
             created_at: now,
             updated_at: now,
             provenance: ProvenanceChain::default(),
@@ -2651,7 +2698,11 @@ impl App {
     }
 
     /// Poll async channels and update state. Call on each event loop tick.
-    pub async fn tick(&mut self) {
+    /// Drain all async event sources. Returns `true` if any work was done that
+    /// requires a redraw (PTY output, agent events, config reload, remote msgs).
+    pub async fn tick(&mut self) -> bool {
+        let mut had_work = false;
+
         // Config hot-reload: drain all pending file-watcher events (notify fires
         // several per save on most platforms). Apply at most one reload per tick.
         let mut config_changed = false;
@@ -2662,6 +2713,7 @@ impl App {
         }
         if config_changed {
             self.apply_config_reload();
+            had_work = true;
         }
 
         // Drain PTY events.
@@ -2680,6 +2732,9 @@ impl App {
         }
 
         let had_pty_output = !pty_output.is_empty();
+        if had_pty_output {
+            had_work = true;
+        }
         // Collect OSC 52 read-query responses before the mutable feed loop.
         let osc52_responses: Vec<String> = pty_output
             .iter()
@@ -2791,12 +2846,14 @@ impl App {
             }
         }
         if agent_events_received {
+            had_work = true;
             self.renderer.blocks = self.blocks.clone();
             self.renderer.agent_running_tool = self.agent_running_tool.clone();
         }
 
         // Drain broker events.
         while let Ok(event) = self.broker_rx.try_recv() {
+            had_work = true;
             if let BrokerEvent::ApprovalRequired(block) = event {
                 self.add_block(block);
             }
@@ -2829,11 +2886,17 @@ impl App {
                 self.remote_connect_gen = gen;
                 self.remote_cursor = 0;
                 self.remote_pty_dims = None;
-                eprintln!("[remote] phone reconnected (gen={gen}), resending all {} blocks", self.blocks.len());
+                eprintln!(
+                    "[remote] phone reconnected (gen={gen}), resending all {} blocks",
+                    self.blocks.len()
+                );
                 self.broadcast_tab_list();
             }
             let mut inbox = vec![];
             hub.poll_inbound(&mut inbox);
+            if !inbox.is_empty() {
+                had_work = true;
+            }
             for msg in inbox {
                 match msg {
                     beyonder_remote::ClientMsg::Prompt { text } => remote_prompts.push(text),
@@ -2844,7 +2907,9 @@ impl App {
                         remote_pty_resize = Some((cols, rows));
                     }
                     beyonder_remote::ClientMsg::Interrupt => remote_interrupt = true,
-                    beyonder_remote::ClientMsg::SwitchTab { index } => remote_switch_tab = Some(index),
+                    beyonder_remote::ClientMsg::SwitchTab { index } => {
+                        remote_switch_tab = Some(index)
+                    }
                     beyonder_remote::ClientMsg::NewTab => remote_new_tab = true,
                     beyonder_remote::ClientMsg::CloseTab => remote_close_tab = true,
                     beyonder_remote::ClientMsg::ToolHint { .. }
@@ -2859,22 +2924,30 @@ impl App {
                     .term_grid
                     .cell_grid()
                     .into_iter()
-                    .map(|row| row.into_iter().map(|c| {
-                        let to_u8 = |f: f32| (f.clamp(0.0, 1.0) * 255.0) as u8;
-                        beyonder_remote::PtyCell {
-                            g: c.grapheme,
-                            fg: [to_u8(c.fg[0]), to_u8(c.fg[1]), to_u8(c.fg[2])],
-                            bg: c.bg.map(|b| [to_u8(b[0]), to_u8(b[1]), to_u8(b[2])]),
-                            bold: c.bold,
-                        }
-                    }).collect())
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|c| {
+                                let to_u8 = |f: f32| (f.clamp(0.0, 1.0) * 255.0) as u8;
+                                beyonder_remote::PtyCell {
+                                    g: c.grapheme,
+                                    fg: [to_u8(c.fg[0]), to_u8(c.fg[1]), to_u8(c.fg[2])],
+                                    bg: c.bg.map(|b| [to_u8(b[0]), to_u8(b[1]), to_u8(b[2])]),
+                                    bold: c.bold,
+                                }
+                            })
+                            .collect()
+                    })
                     .collect();
                 // Trim trailing blank rows to reduce payload size.
                 while let Some(last) = cells.last() {
-                    let blank = last.iter().all(|c| {
-                        (c.g.is_empty() || c.g == " ") && !c.bold && c.bg.is_none()
-                    });
-                    if blank { cells.pop(); } else { break; }
+                    let blank = last
+                        .iter()
+                        .all(|c| (c.g.is_empty() || c.g == " ") && !c.bold && c.bg.is_none());
+                    if blank {
+                        cells.pop();
+                    } else {
+                        break;
+                    }
                 }
                 let (cur_row, cur_col) = self.term_grid.cursor_pos();
                 let _ = hub.send(beyonder_remote::ServerMsg::PtyFrame(
@@ -2925,7 +2998,8 @@ impl App {
             // Apply every tick — window resize events keep trying to override.
             if self.term_grid.cols != cols as usize || self.term_grid.rows != rows as usize {
                 self.term_grid.resize(cols as usize, rows as usize);
-                self.block_builder.set_grid_size(cols as usize, rows as usize);
+                self.block_builder
+                    .set_grid_size(cols as usize, rows as usize);
                 if let Some(pty) = &self.pty {
                     let _ = pty.resize(rows, cols);
                 }
@@ -2951,9 +3025,14 @@ impl App {
             if text.starts_with('/') {
                 self.handle_command(&text).await;
             } else {
-                eprintln!("[remote] ignoring Prompt from phone (agent runs on phone): {}", &text[..text.len().min(80)]);
+                eprintln!(
+                    "[remote] ignoring Prompt from phone (agent runs on phone): {}",
+                    &text[..text.len().min(80)]
+                );
             }
         }
+
+        had_work
     }
 
     fn handle_build_event(&mut self, event: BuildEvent) {

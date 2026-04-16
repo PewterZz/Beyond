@@ -7,6 +7,7 @@ use beyonder_acp::AcpClient;
 use beyonder_core::{AgentId, AgentInfo, AgentKind, CapabilitySet, DeathReason, SessionId};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -46,10 +47,15 @@ pub struct AgentHandle {
     cmd_tx: mpsc::UnboundedSender<AgentCmd>,
 }
 
+/// Callback to wake the event loop when supervisor events are produced.
+pub type WakeFn = Arc<dyn Fn() + Send + Sync + 'static>;
+
 /// Manages the lifecycle of all agent processes.
 pub struct AgentSupervisor {
     agents: HashMap<AgentId, AgentHandle>,
     event_tx: mpsc::UnboundedSender<SupervisorEvent>,
+    /// Optional callback to wake the UI event loop on new events.
+    wake: Option<WakeFn>,
 }
 
 impl AgentSupervisor {
@@ -57,7 +63,13 @@ impl AgentSupervisor {
         Self {
             agents: HashMap::new(),
             event_tx,
+            wake: None,
         }
+    }
+
+    /// Set a wake callback that fires whenever the supervisor produces an event.
+    pub fn set_wake(&mut self, wake: WakeFn) {
+        self.wake = Some(wake);
     }
 
     /// Clone the supervisor event sender — used by callers that need to inject events.
@@ -197,6 +209,7 @@ impl AgentSupervisor {
         // channel to the supervisor channel. This runs independently of turn-driving.
         let sup_tx_fwd = self.event_tx.clone();
         let aid_fwd = agent_id.clone();
+        let wake_fwd = self.wake.clone();
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 // Unbounded send — never blocks, never deadlocks.
@@ -204,6 +217,9 @@ impl AgentSupervisor {
                     agent_id: aid_fwd.clone(),
                     event,
                 });
+                if let Some(ref w) = wake_fwd {
+                    w();
+                }
             }
         });
 

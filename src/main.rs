@@ -6,7 +6,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 fn main() -> Result<()> {
@@ -24,10 +24,10 @@ fn main() -> Result<()> {
     info!("Beyond starting");
     let config = BeyonderConfig::load_or_default();
 
-    let event_loop = EventLoop::new()?;
-    // WaitUntil is set per-frame in about_to_wait — not here.
+    let event_loop = EventLoop::<()>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
 
-    let mut handler = BeyonderHandler::new(config);
+    let mut handler = BeyonderHandler::new(config, proxy);
     event_loop.run_app(&mut handler)?;
     Ok(())
 }
@@ -37,10 +37,13 @@ struct BeyonderHandler {
     app: Option<App>,
     window: Option<Arc<Window>>,
     rt: tokio::runtime::Runtime,
+    proxy: EventLoopProxy<()>,
+    /// True when any event source has produced work that requires a redraw.
+    needs_redraw: bool,
 }
 
 impl BeyonderHandler {
-    fn new(config: BeyonderConfig) -> Self {
+    fn new(config: BeyonderConfig, proxy: EventLoopProxy<()>) -> Self {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -50,11 +53,13 @@ impl BeyonderHandler {
             app: None,
             window: None,
             rt,
+            proxy,
+            needs_redraw: true,
         }
     }
 }
 
-impl ApplicationHandler for BeyonderHandler {
+impl ApplicationHandler<()> for BeyonderHandler {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.app.is_some() {
             return;
@@ -71,14 +76,20 @@ impl ApplicationHandler for BeyonderHandler {
         let window = Arc::new(window);
 
         let config = self.config.clone();
+        let proxy = self.proxy.clone();
         let app = self
             .rt
-            .block_on(App::new(Arc::clone(&window), config))
+            .block_on(App::new(Arc::clone(&window), config, proxy))
             .expect("Failed to init Beyond app");
 
         info!("Beyond initialized — window open");
         self.window = Some(Arc::clone(&window));
         self.app = Some(app);
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+        // An async event source (PTY, supervisor, broker, remote) woke us up.
+        self.needs_redraw = true;
     }
 
     fn window_event(
@@ -87,6 +98,11 @@ impl ApplicationHandler for BeyonderHandler {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        // Any window event that isn't a pure redraw request implies state change.
+        if !matches!(event, WindowEvent::RedrawRequested) {
+            self.needs_redraw = true;
+        }
+
         let Some(app) = self.app.as_mut() else { return };
 
         let should_close = self.rt.block_on(app.handle_window_event(&event));
@@ -108,13 +124,26 @@ impl ApplicationHandler for BeyonderHandler {
         // occluded or minimised (macOS suppresses RedrawRequested for hidden
         // windows, which would freeze streaming agent output).
         if let Some(app) = self.app.as_mut() {
-            self.rt.block_on(app.tick());
+            let had_work = self.rt.block_on(app.tick());
+            if had_work {
+                self.needs_redraw = true;
+            }
         }
-        if let Some(window) = &self.window {
-            window.request_redraw();
+
+        if self.needs_redraw {
+            self.needs_redraw = false;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            // While actively producing frames, use a short poll so streaming
+            // content stays smooth (~120fps cap).
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(8),
+            ));
+        } else {
+            // Nothing changed — sleep until the next winit/user event or
+            // until an async source wakes us via EventLoopProxy.
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            std::time::Instant::now() + std::time::Duration::from_millis(8),
-        ));
     }
 }
