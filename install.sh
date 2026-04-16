@@ -49,6 +49,36 @@ download() {
     fi
 }
 
+# Install NvChad — a batteries-included Neovim config — so nvim looks and
+# behaves pleasantly the moment Beyond opens a file. Safe: we never clobber
+# an existing ~/.config/nvim. Opt in with INSTALL_NVCHAD=1, or it auto-runs
+# when no nvim config is present.
+install_nvchad() {
+    if ! command -v nvim &>/dev/null; then
+        info "nvim not found on PATH — skipping NvChad setup."
+        info "  Install nvim (brew install neovim / apt install neovim), then re-run with INSTALL_NVCHAD=1."
+        return 0
+    fi
+    if ! command -v git &>/dev/null; then
+        info "git not found — skipping NvChad setup."
+        return 0
+    fi
+
+    local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/nvim"
+    if [ -e "$cfg" ]; then
+        info "Existing nvim config at $cfg — leaving it alone."
+        info "  To try NvChad, back up and reinstall:"
+        info "    mv $cfg ${cfg}.bak && INSTALL_NVCHAD=1 $0"
+        return 0
+    fi
+
+    info "Installing NvChad starter to $cfg..."
+    git clone --depth 1 https://github.com/NvChad/starter "$cfg" >/dev/null 2>&1 \
+        || { info "NvChad clone failed — skipping (you can rerun with INSTALL_NVCHAD=1)."; return 0; }
+    rm -rf "$cfg/.git"
+    info "NvChad installed. First 'nvim' launch will sync plugins (takes ~30s)."
+}
+
 main() {
     local version="${VERSION:-}"
     local platform
@@ -86,6 +116,12 @@ main() {
         chmod +x "${INSTALL_DIR}/${bin}"
     done
 
+    # NvChad: installs only when the user opts in (INSTALL_NVCHAD=1) AND
+    # no nvim config is present. Never clobbers existing configs.
+    if [ "${INSTALL_NVCHAD:-0}" = "1" ]; then
+        install_nvchad
+    fi
+
     info "Beyond v${version} installed to ${INSTALL_DIR}"
     echo ""
     echo "  Run 'beyondtty' or 'beyonder' to launch."
@@ -96,6 +132,11 @@ main() {
     echo "  Recommended:"
     echo "    - nvim (or vim / nano) — opened when you click a file link"
     echo "      in the block stream. Respects \$VISUAL / \$EDITOR."
+    echo "    - NvChad — a modern Neovim config for a pleasant editor UI."
+    echo "      Install it alongside Beyond with:"
+    echo "        INSTALL_NVCHAD=1 curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | bash"
+    echo "      or manually: git clone --depth 1 https://github.com/NvChad/starter \\"
+    echo "                   \"\${XDG_CONFIG_HOME:-\$HOME/.config}/nvim\""
 }
 
 main "$@"
