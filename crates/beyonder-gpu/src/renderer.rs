@@ -202,6 +202,12 @@ pub struct Renderer {
     /// compute cached heights — invalidate if these change (resize, font change).
     layout_params_key: (u32, u32, Option<usize>),
 
+    /// Cached block header labels: block_id → (content_generation, label).
+    /// Avoids re-formatting "◆ agent", "⚙ tool …", etc. every frame.
+    header_label_cache: HashMap<beyonder_core::BlockId, (u64, String)>,
+    /// Cached block metadata lines (cwd + duration): block_id → (generation, line).
+    metadata_line_cache: HashMap<beyonder_core::BlockId, (u64, String)>,
+
     /// Currently executing tool per agent: agent_id → tool_name.
     /// Set by App when ToolCallRequested arrives; cleared on TextDelta or TurnComplete.
     pub agent_running_tool: HashMap<beyonder_core::AgentId, String>,
@@ -464,6 +470,8 @@ impl Renderer {
             block_y_prefix: vec![0.0],
             _blocks_generation: 0,
             layout_params_key: (0, 0, None),
+            header_label_cache: HashMap::new(),
+            metadata_line_cache: HashMap::new(),
             agent_running_tool: HashMap::new(),
             user_expanded: HashSet::new(),
             tab_labels: vec![],
@@ -475,6 +483,36 @@ impl Renderer {
             selecting: false,
             qr_overlays: HashMap::new(),
         })
+    }
+
+    /// Format shell block metadata line (cwd + duration). Static to avoid borrowing self.
+    fn format_shell_meta(cwd: &std::path::Path, duration_ms: Option<u64>) -> String {
+        static HOME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let home = HOME.get_or_init(|| std::env::var("HOME").unwrap_or_default());
+        let cwd_str = cwd.to_str().unwrap_or("~");
+        let dir_display = if !home.is_empty() && cwd_str.starts_with(home.as_str()) {
+            format!("~{}", &cwd_str[home.len()..])
+        } else {
+            cwd_str.to_string()
+        };
+        match duration_ms.map(format_duration) {
+            Some(d) => format!("{}  {}", dir_display, d),
+            None => dir_display,
+        }
+    }
+
+    /// Get or compute a cached block header label.
+    fn cached_header_label(&mut self, block: &Block) -> String {
+        let gen = block.updated_at.timestamp_millis() as u64;
+        if let Some((cached_gen, cached)) = self.header_label_cache.get(&block.id) {
+            if *cached_gen == gen {
+                return cached.clone();
+            }
+        }
+        let label = block_header_label(block);
+        self.header_label_cache
+            .insert(block.id.clone(), (gen, label.clone()));
+        label
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -1104,7 +1142,6 @@ impl Renderer {
         // Byte position of the caret (▌ is 3 UTF-8 bytes; █ is 3 bytes too)
         let prefix_len = self.input_mode_prefix.len();
         let caret_byte_end = if self.input_all_selected {
-            // select-all: cursor conceptually at the end
             text.len()
         } else {
             prefix_len + cursor + "▌".len()
@@ -2308,17 +2345,25 @@ impl Renderer {
                     let meta_font = phys_font * 0.88;
                     let meta_line_h = meta_font * 1.4;
                     let meta_y = sy + 4.0 * sc;
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    let cwd_str = cwd.to_str().unwrap_or("~");
-                    let dir_display = if !home.is_empty() && cwd_str.starts_with(home.as_str()) {
-                        format!("~{}", &cwd_str[home.len()..])
+                    // Cache metadata line per block — avoids env::var("HOME") + format!
+                    // every frame for every visible shell block.
+                    let gen = block.updated_at.timestamp_millis() as u64;
+                    let meta_text = if let Some((cached_gen, cached)) =
+                        self.metadata_line_cache.get(&block.id)
+                    {
+                        if *cached_gen == gen {
+                            cached.clone()
+                        } else {
+                            let m = Self::format_shell_meta(cwd, *duration_ms);
+                            self.metadata_line_cache
+                                .insert(block.id.clone(), (gen, m.clone()));
+                            m
+                        }
                     } else {
-                        cwd_str.to_string()
-                    };
-                    let dur_str = duration_ms.map(format_duration);
-                    let meta_text = match &dur_str {
-                        Some(d) => format!("{}  {}", dir_display, d),
-                        None => dir_display,
+                        let m = Self::format_shell_meta(cwd, *duration_ms);
+                        self.metadata_line_cache
+                            .insert(block.id.clone(), (gen, m.clone()));
+                        m
                     };
                     let meta_color = gc(self.theme.subtext);
                     let meta_buf = self.make_buffer(
@@ -2351,7 +2396,7 @@ impl Renderer {
                     ));
                 } else if !is_agent && !is_plain_text {
                     // Non-shell, non-agent, non-text blocks: single centered header line.
-                    let raw_label = block_header_label(block);
+                    let raw_label = self.cached_header_label(block);
                     // Only output-bearing ToolCall blocks get a collapse chevron.
                     let has_tool_output = matches!(&block.content,
                         BlockContent::ToolCall { output, .. } if output.is_some());
@@ -3651,6 +3696,8 @@ fn parse_inline(
 
 #[cfg(test)]
 mod tests {
+    use super::Renderer;
+
     /// Test the prefix-sum + binary-search logic used by rebuild_block_layout_cache
     /// and first_visible_block. This validates that O(log n) viewport access works
     /// correctly without requiring a GPU context.
@@ -3738,5 +3785,60 @@ mod tests {
         assert_eq!(taken, vec![1, 2, 3, 4, 5]);
         data = taken;
         assert_eq!(data, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn format_shell_meta_abbreviates_home() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if home.is_empty() {
+            return; // CI might not have HOME
+        }
+        let cwd = std::path::PathBuf::from(&home).join("Projects/foo");
+        let meta = Renderer::format_shell_meta(&cwd, None);
+        assert!(meta.starts_with("~/"), "should abbreviate HOME: got {meta}");
+        assert!(meta.contains("Projects/foo"));
+    }
+
+    #[test]
+    fn format_shell_meta_includes_duration() {
+        let cwd = std::path::PathBuf::from("/tmp");
+        let meta = Renderer::format_shell_meta(&cwd, Some(1500));
+        assert!(meta.contains("/tmp"), "should contain cwd");
+        assert!(meta.contains("1.5"), "should contain formatted duration");
+    }
+
+    #[test]
+    fn block_header_label_caches_by_generation() {
+        use beyonder_core::*;
+        use std::collections::HashMap;
+
+        let bid = BlockId::new();
+        let mut cache: HashMap<BlockId, (u64, String)> = HashMap::new();
+
+        // First call — cache miss.
+        let gen = 100u64;
+        assert!(!cache.contains_key(&bid));
+        cache.insert(bid.clone(), (gen, "⚙ test_tool".to_string()));
+
+        // Same generation — cache hit.
+        let entry = cache.get(&bid).unwrap();
+        assert_eq!(entry.0, gen);
+        assert_eq!(entry.1, "⚙ test_tool");
+
+        // Different generation — cache invalidated.
+        let new_gen = 200u64;
+        let entry = cache.get(&bid).unwrap();
+        assert_ne!(entry.0, new_gen);
+        cache.insert(bid.clone(), (new_gen, "⚙ updated".to_string()));
+        assert_eq!(cache.get(&bid).unwrap().1, "⚙ updated");
+    }
+
+    #[test]
+    fn home_env_cached_via_once_lock() {
+        // Calling format_shell_meta twice should use the OnceLock cached HOME.
+        let cwd = std::path::PathBuf::from("/tmp/test");
+        let a = Renderer::format_shell_meta(&cwd, None);
+        let b = Renderer::format_shell_meta(&cwd, None);
+        assert_eq!(a, b, "same input should produce same output");
     }
 }
