@@ -14,6 +14,14 @@ pub struct PairingSecret {
     pub token: String,
 }
 
+/// Raw QR module bitmap. Width = modules per side (no quiet zone).
+/// `modules` is row-major with `true` = dark cell.
+#[derive(Debug, Clone)]
+pub struct QrBitmap {
+    pub width: usize,
+    pub modules: Vec<bool>,
+}
+
 impl PairingSecret {
     pub fn load_or_create() -> Result<Self> {
         let path = token_path()?;
@@ -50,16 +58,37 @@ impl PairingSecret {
 
     /// Render the pairing URL as an ASCII-art QR (dense, fits ~40x40 cells)
     /// suitable for display as a single text block.
+    /// Raw module bitmap for the pairing URL. The consumer is responsible for
+    /// drawing it as square pixels (text-mode QRs are unreadable — too much
+    /// vertical padding from terminal line-height to form valid modules).
+    pub fn qr_bitmap(&self, host: &str, port: u16, tls: bool) -> Result<QrBitmap> {
+        use qrcode::{Color, EcLevel, QrCode};
+        let url = self.pairing_url(host, port, tls);
+        let code = QrCode::with_error_correction_level(url.as_bytes(), EcLevel::M)
+            .context("qr encode failed")?;
+        let width = code.width();
+        let modules = code.to_colors().into_iter().map(|c| c == Color::Dark).collect();
+        Ok(QrBitmap { width, modules })
+    }
+
     pub fn qr_ascii(&self, host: &str, port: u16, tls: bool) -> Result<String> {
         use qrcode::{EcLevel, QrCode};
         let url = self.pairing_url(host, port, tls);
-        let code = QrCode::with_error_correction_level(url.as_bytes(), EcLevel::L)
+        // Medium EC — more robust to camera distortion than L.
+        let code = QrCode::with_error_correction_level(url.as_bytes(), EcLevel::M)
             .context("qr encode failed")?;
-        // Render half-height so each row = 2 modules, halving terminal line count.
+        // Why 2×1 full-block cells, not half-blocks:
+        //   Beyonder renders Text blocks through glyphon with line_height = font_size * 1.4.
+        //   The 40% extra vertical gap breaks any rendering that relies on adjacent rows
+        //   touching — half-block Unicode (▀ ▄) ends up with horizontal stripes of
+        //   background between each module row, which scanners read as data.
+        //   A solid `█` inside a single row sidesteps the line-gap entirely. We spend
+        //   2 cells per module horizontally so each module ≈ square given the typical
+        //   2:1 tall monospace cell aspect ratio.
         let string = code
             .render::<char>()
             .quiet_zone(true)
-            .module_dimensions(1, 1)
+            .module_dimensions(2, 1)
             .dark_color('█')
             .light_color(' ')
             .build();

@@ -211,6 +211,18 @@ pub struct Renderer {
     pub text_selection: Option<TextSelection>,
     /// True while the user is mid-drag (mouse down + dragging).
     pub selecting: bool,
+
+    /// Blocks that render as a QR bitmap instead of text — rect-painted directly
+    /// so line-height spacing doesn't shatter the modules. Key is the block id
+    /// of a Text block registered via `set_qr_block`; value is the module grid.
+    pub qr_overlays: HashMap<beyonder_core::BlockId, QrBitmap>,
+}
+
+/// QR module bitmap used by `Renderer::set_qr_block`. Row-major, `true` = dark.
+#[derive(Clone, Debug)]
+pub struct QrBitmap {
+    pub width: usize,
+    pub modules: Vec<bool>,
 }
 
 /// Accumulates GlyphBuffer entries for a frame. Parallel `keys` vec records
@@ -441,6 +453,7 @@ impl Renderer {
             search_current_match: None,
             text_selection: None,
             selecting: false,
+            qr_overlays: HashMap::new(),
         })
     }
 
@@ -633,20 +646,31 @@ impl Renderer {
         Some((row, col))
     }
 
-    fn agent_cursor_at(
+    /// True when a block renders its body as a single plain-text glyph buffer
+    /// (AgentMessage via markdown-shaper, Text via plain shaper). Those are the
+    /// block kinds for which drag-to-select walks cosmic-text Cursors.
+    fn is_buffer_block(block: &Block) -> bool {
+        matches!(
+            block.content,
+            BlockContent::AgentMessage { .. } | BlockContent::Text { .. }
+        )
+    }
+
+    fn buffer_cursor_at(
         &mut self,
         block_idx: usize,
         phys_x: f32,
         phys_y: f32,
     ) -> Option<TextCursor> {
         let block = self.blocks.get(block_idx)?.clone();
-        if !matches!(block.content, BlockContent::AgentMessage { .. }) {
+        if !Self::is_buffer_block(&block) {
             return None;
         }
         let content_text = block_content_text(&block);
         if content_text.is_empty() {
             return None;
         }
+        let is_markdown = matches!(block.content, BlockContent::AgentMessage { .. });
         let sc = self.scale_factor;
         let phys_font = self.font_size * sc;
         let line_h = phys_font * 1.4;
@@ -655,20 +679,29 @@ impl Renderer {
         let bw_bits = buf_w.to_bits();
         let pf_bits = phys_font.to_bits();
         let vh_bits = self.viewport.height.to_bits();
-        // Use cache if key matches; otherwise shape fresh and cache it.
         let cached_matches = self
             .glyph_buf_cache
             .get(&block.id)
-            .map(|(l, b, p, v, _)| *l == content_len && *b == bw_bits && *p == pf_bits && *v == vh_bits)
+            .map(|(l, b, p, v, _)| {
+                *l == content_len && *b == bw_bits && *p == pf_bits && *v == vh_bits
+            })
             .unwrap_or(false);
         if !cached_matches {
-            let (buf, _skipped) = self.make_markdown_buffer(&content_text, buf_w, phys_font);
+            let buf = if is_markdown {
+                self.make_markdown_buffer(&content_text, buf_w, phys_font).0
+            } else {
+                self.make_buffer(&content_text, buf_w, phys_font, gc(self.theme.text))
+            };
             self.glyph_buf_cache
                 .insert(block.id.clone(), (content_len, bw_bits, pf_bits, vh_bits, buf));
         }
         let (_, _, _, _, buf) = self.glyph_buf_cache.get(&block.id)?;
-        let max_vis = ((self.viewport.height / line_h).ceil() as usize + 30).max(50);
-        let skipped = content_text.lines().count().saturating_sub(max_vis);
+        let skipped = if is_markdown {
+            let max_vis = ((self.viewport.height / line_h).ceil() as usize + 30).max(50);
+            content_text.lines().count().saturating_sub(max_vis)
+        } else {
+            0
+        };
         let adjusted_text_y = text_y + skipped as f32 * line_h;
         let local_x = (phys_x - x_content).max(0.0);
         let local_y = (phys_y - adjusted_text_y).max(0.0);
@@ -704,8 +737,8 @@ impl Renderer {
                     return true;
                 }
             }
-            BlockContent::AgentMessage { .. } => {
-                if let Some(cur) = self.agent_cursor_at(idx, phys_x, phys_y) {
+            BlockContent::AgentMessage { .. } | BlockContent::Text { .. } => {
+                if let Some(cur) = self.buffer_cursor_at(idx, phys_x, phys_y) {
                     self.text_selection = Some(TextSelection::Buffer {
                         block_idx: idx,
                         anchor: cur,
@@ -739,7 +772,7 @@ impl Renderer {
                 }
             }
             TextSelection::Buffer { block_idx, anchor, .. } => {
-                if let Some(cur) = self.agent_cursor_at(block_idx, phys_x, phys_y) {
+                if let Some(cur) = self.buffer_cursor_at(block_idx, phys_x, phys_y) {
                     self.text_selection = Some(TextSelection::Buffer {
                         block_idx,
                         anchor,
@@ -758,6 +791,74 @@ impl Renderer {
     pub fn clear_text_selection(&mut self) {
         self.text_selection = None;
         self.selecting = false;
+    }
+
+    /// Register a Text block to be rendered as a QR bitmap (solid rect modules,
+    /// no glyphs). The caller is responsible for pushing a Text block first and
+    /// then calling this with its id.
+    pub fn set_qr_block(&mut self, block_id: beyonder_core::BlockId, qr: QrBitmap) {
+        self.qr_overlays.insert(block_id, qr);
+    }
+
+    /// Compute integer-pixel module size for a QR bitmap.
+    /// Targets ~250 logical px total side; at least 2 physical px per module.
+    fn qr_mod_px(&self, qr: &QrBitmap) -> f32 {
+        let sc = self.scale_factor;
+        let side_modules = (qr.width + 8) as f32; // +8 for 4-module quiet zone each side
+        // Target ~250 logical px → 250*sc physical.
+        let target = 250.0 * sc;
+        let ideal = (target / side_modules).floor().max(2.0);
+        ideal
+    }
+
+    /// Pixel height a QR overlay will occupy for a given content width.
+    fn qr_overlay_height(&self, qr: &QrBitmap, _content_w: f32) -> f32 {
+        let sc = self.scale_factor;
+        let content_pad = 8.0 * sc;
+        let mod_px = self.qr_mod_px(qr);
+        let side_modules = (qr.width + 8) as f32;
+        mod_px * side_modules + content_pad * 2.0
+    }
+
+    fn paint_qr_block(
+        &self,
+        qr: &QrBitmap,
+        x: f32,
+        sy: f32,
+        _content_w: f32,
+        rects: &mut Vec<RectInstance>,
+    ) {
+        if qr.width == 0 || qr.modules.is_empty() {
+            return;
+        }
+        let sc = self.scale_factor;
+        let content_pad = 8.0 * sc;
+        let mod_px = self.qr_mod_px(qr);
+        let side_modules = (qr.width + 8) as f32;
+        let qr_side = mod_px * side_modules;
+        // Left-align with a small indent (same as block content).
+        let qr_x = (x + content_pad).floor();
+        let qr_y = (sy + content_pad).floor();
+        let white = [1.0, 1.0, 1.0, 1.0];
+        let black = [0.0, 0.0, 0.0, 1.0];
+        rects.push(RectInstance::filled(qr_x, qr_y, qr_side, qr_side, white));
+        let quiet = 4.0 * mod_px;
+        for (i, &dark) in qr.modules.iter().enumerate() {
+            if !dark {
+                continue;
+            }
+            let mx = (i % qr.width) as f32;
+            let my = (i / qr.width) as f32;
+            let px = qr_x + quiet + mx * mod_px;
+            let py = qr_y + quiet + my * mod_px;
+            rects.push(RectInstance::filled(
+                px.floor(),
+                py.floor(),
+                mod_px.ceil(),
+                mod_px.ceil(),
+                black,
+            ));
+        }
     }
 
     /// True when there's a non-empty selection (anchor != cursor).
@@ -1351,6 +1452,9 @@ impl Renderer {
 
     /// for the currently running block.
     fn block_height(&self, idx: usize, block: &Block, content_w: f32, phys_font: f32) -> f32 {
+        if let Some(qr) = self.qr_overlays.get(&block.id) {
+            return self.qr_overlay_height(qr, content_w);
+        }
         if self.is_collapsed(block) {
             phys_font * 1.8 // header bar only
         } else if self.running_block_idx == Some(idx) && !self.tui_cells.is_empty() {
@@ -1377,6 +1481,12 @@ impl Renderer {
 
             if self.viewport.is_visible(y, h) {
                 let x = padding;
+                // QR overlay short-circuits normal block rendering: paint rects and skip.
+                if let Some(qr) = self.qr_overlays.get(&block.id) {
+                    self.paint_qr_block(qr, x, sy, content_w, &mut rects);
+                    y += h + gap;
+                    continue;
+                }
                 match &block.content {
                     BlockContent::ShellCommand { .. } => {
                         render_shell_block(block, x, sy, content_w, h, phys_font, sc, &mut rects);
@@ -1562,16 +1672,18 @@ impl Renderer {
                                     let tint = [0.40, 0.65, 1.0, 0.35];
                                     let phys_font_local = self.font_size * sc;
                                     let line_h = phys_font_local * 1.4;
-                                    let total_lines = match &block.content {
+                                    let skipped = match &block.content {
                                         BlockContent::AgentMessage { .. } => {
-                                            block_content_text(block).lines().count()
+                                            let total = block_content_text(block).lines().count();
+                                            let max_vis = ((self.viewport.height / line_h)
+                                                .ceil()
+                                                as usize
+                                                + 30)
+                                                .max(50);
+                                            total.saturating_sub(max_vis)
                                         }
                                         _ => 0,
                                     };
-                                    let max_vis = ((self.viewport.height / line_h).ceil() as usize
-                                        + 30)
-                                        .max(50);
-                                    let skipped = total_lines.saturating_sub(max_vis);
                                     let adjusted_text_y = text_y + skipped as f32 * line_h;
                                     for run in buf.layout_runs() {
                                         if let Some((x_off, w_off)) = run.highlight(s, e) {
@@ -2056,6 +2168,11 @@ impl Renderer {
             let sy = self.viewport.content_to_screen_y(y);
 
             if self.viewport.is_visible(y, h) {
+                // QR overlay blocks are painted as rects in layout_blocks; no glyphs.
+                if self.qr_overlays.contains_key(&block.id) {
+                    y += h + gap;
+                    continue;
+                }
                 let x = padding;
                 // Layout constants (physical px).
                 let is_shell = matches!(block.content, BlockContent::ShellCommand { .. });

@@ -467,6 +467,11 @@ pub struct App {
     /// How many blocks have been marked final on the phone. Running blocks
     /// beyond this get rebroadcast each tick so streaming text stays current.
     remote_cursor: usize,
+    /// Phone-preferred PTY dims. Re-applied each tick so the Mac window's
+    /// resize events don't clobber what the phone asked for.
+    remote_pty_dims: Option<(u16, u16)>,
+    remote_last_pty_frame: std::time::Instant,
+    remote_connect_gen: u64,
 }
 
 impl App {
@@ -624,6 +629,9 @@ impl App {
             search_saved_input: String::new(),
             remote: None,
             remote_cursor: 0,
+            remote_pty_dims: None,
+            remote_last_pty_frame: std::time::Instant::now(),
+            remote_connect_gen: 0,
         })
     }
 
@@ -743,7 +751,9 @@ impl App {
         self.tabs.push(None);
         self.tab_titles.push(title);
         self.active_tab = next_idx;
+        self.remote_cursor = 0;
         self.resync_renderer_after_tab_switch();
+        self.broadcast_tab_list();
     }
 
     /// Close the active tab. Falls back to adjacent tab; if it was the last tab,
@@ -772,7 +782,9 @@ impl App {
         } else {
             target_idx
         };
+        self.remote_cursor = 0;
         self.resync_renderer_after_tab_switch();
+        self.broadcast_tab_list();
     }
 
     /// Switch to the tab at `idx` if valid and not already active.
@@ -787,7 +799,9 @@ impl App {
         let displaced = self.exchange_active(target);
         self.tabs[self.active_tab] = Some(displaced);
         self.active_tab = idx;
+        self.remote_cursor = 0;
         self.resync_renderer_after_tab_switch();
+        self.broadcast_tab_list();
     }
 
     pub fn prev_tab(&mut self) {
@@ -808,6 +822,24 @@ impl App {
         }
         let idx = (self.active_tab + 1) % self.tabs.len();
         self.switch_tab(idx);
+    }
+
+    fn build_tab_list(&self) -> beyonder_remote::TabList {
+        let tabs: Vec<beyonder_remote::TabInfo> = self.tab_titles.iter().enumerate().map(|(i, title)| {
+            let sid = if i == self.active_tab {
+                self.session.id.0.clone()
+            } else {
+                self.tabs[i].as_ref().map(|t| t.session.id.0.clone()).unwrap_or_default()
+            };
+            beyonder_remote::TabInfo { index: i, title: title.clone(), session_id: sid }
+        }).collect();
+        beyonder_remote::TabList { tabs, active: self.active_tab }
+    }
+
+    fn broadcast_tab_list(&self) {
+        if let Some(hub) = &self.remote {
+            let _ = hub.send(beyonder_remote::ServerMsg::TabList(self.build_tab_list()));
+        }
     }
 
     /// Handle a winit window event.
@@ -2375,13 +2407,18 @@ impl App {
                     .await
                     {
                         Ok(hub) => {
-                            let msg = format!(
-                                "phone bridge started on :{}\nScan to pair:\n\n{}\nOr enter URL manually: {}",
-                                hub.port, hub.qr_ascii, hub.pairing_url
+                            let header = format!(
+                                "phone bridge started on :{}\nScan to pair:",
+                                hub.port
                             );
+                            let footer =
+                                format!("Or enter URL manually: {}", hub.pairing_url);
+                            let bitmap = hub.qr_bitmap.clone();
                             self.remote = Some(hub);
                             self.remote_cursor = 0;
-                            self.push_text_block(msg);
+                            self.push_text_block(header);
+                            self.push_qr_block(&bitmap);
+                            self.push_text_block(footer);
                         }
                         Err(e) => {
                             error!("phone bridge: {e}");
@@ -2399,11 +2436,12 @@ impl App {
             }
             ["/phone", "pair"] => {
                 if let Some(hub) = &self.remote {
-                    let msg = format!(
-                        "Scan to pair ({}):\n\n{}\nOr enter URL manually: {}",
-                        hub.endpoint_label, hub.qr_ascii, hub.pairing_url
-                    );
-                    self.push_text_block(msg);
+                    let header = format!("Scan to pair ({}):", hub.endpoint_label);
+                    let footer = format!("Or enter URL manually: {}", hub.pairing_url);
+                    let bitmap = hub.qr_bitmap.clone();
+                    self.push_text_block(header);
+                    self.push_qr_block(&bitmap);
+                    self.push_text_block(footer);
                 } else {
                     self.push_text_block("phone bridge off — run /phone on first".into());
                 }
@@ -2412,11 +2450,15 @@ impl App {
                 if let Some(hub) = self.remote.as_mut() {
                     match hub.use_tailscale() {
                         Some(host) => {
-                            let msg = format!(
-                                "phone bridge now advertised via Tailscale: {}\n\n{}\n{}",
-                                host, hub.qr_ascii, hub.pairing_url
+                            let header = format!(
+                                "phone bridge now advertised via Tailscale: {}",
+                                host
                             );
-                            self.push_text_block(msg);
+                            let footer = hub.pairing_url.clone();
+                            let bitmap = hub.qr_bitmap.clone();
+                            self.push_text_block(header);
+                            self.push_qr_block(&bitmap);
+                            self.push_text_block(footer);
                         }
                         None => self.push_text_block(
                             "tailscale not installed or not logged in — `tailscale status` must work".into(),
@@ -2430,11 +2472,13 @@ impl App {
                 if let Some(hub) = self.remote.as_mut() {
                     match hub.use_ngrok().await {
                         Ok(host) => {
-                            let msg = format!(
-                                "phone bridge tunneled via ngrok: wss://{}\n\n{}\n{}",
-                                host, hub.qr_ascii, hub.pairing_url
-                            );
-                            self.push_text_block(msg);
+                            let header =
+                                format!("phone bridge tunneled via ngrok: wss://{}", host);
+                            let footer = hub.pairing_url.clone();
+                            let bitmap = hub.qr_bitmap.clone();
+                            self.push_text_block(header);
+                            self.push_qr_block(&bitmap);
+                            self.push_text_block(footer);
                         }
                         Err(e) => self.push_text_block(format!("ngrok failed: {e}")),
                     }
@@ -2548,6 +2592,39 @@ impl App {
         self.config = new_config;
         if !notes.is_empty() {
             self.push_text_block(format!("Config reloaded: {}", notes.join(", ")));
+        }
+    }
+
+    /// Push an empty Text block that the renderer paints as a QR bitmap.
+    /// Used for `/phone` pairing codes — in-line glyphs can't form scannable
+    /// QR modules because glyphon line-height leaves gaps between rows.
+    fn push_qr_block(&mut self, bitmap: &beyonder_remote::QrBitmap) {
+        use beyonder_core::{BlockContent, BlockId, BlockKind, BlockStatus, ProvenanceChain};
+        let now = chrono::Utc::now();
+        let id = BlockId::new();
+        let block = beyonder_core::Block {
+            id: id.clone(),
+            kind: BlockKind::System,
+            parent_id: None,
+            agent_id: None,
+            session_id: self.session.id.clone(),
+            status: BlockStatus::Completed,
+            content: BlockContent::Text { text: String::new() },
+            created_at: now,
+            updated_at: now,
+            provenance: ProvenanceChain::default(),
+        };
+        self.blocks.push(block.clone());
+        self.renderer.blocks.push(block);
+        self.renderer.set_qr_block(
+            id,
+            beyonder_gpu::renderer::QrBitmap {
+                width: bitmap.width,
+                modules: bitmap.modules.clone(),
+            },
+        );
+        if self.renderer.viewport.pinned_to_bottom {
+            self.renderer.viewport.scroll_to_bottom();
         }
     }
 
@@ -2735,52 +2812,146 @@ impl App {
         }
 
         // /phone bridge: drain inbound commands, then push any new/changed blocks.
+        // Architecture: the agent runs on the phone (local MLX or cloud). The
+        // terminal is a pure executor — `RunCommand` writes to the shell PTY,
+        // `Prompt` is kept as a legacy fallback that invokes the local agent.
         let mut remote_prompts: Vec<String> = vec![];
+        let mut remote_shell: Vec<String> = vec![];
+        let mut remote_pty_input: Vec<Vec<u8>> = vec![];
+        let mut remote_pty_resize: Option<(u16, u16)> = None;
         let mut remote_interrupt = false;
+        let mut remote_switch_tab: Option<usize> = None;
+        let mut remote_new_tab = false;
+        let mut remote_close_tab = false;
         if let Some(hub) = &self.remote {
+            let gen = hub.connect_generation();
+            if gen != self.remote_connect_gen {
+                self.remote_connect_gen = gen;
+                self.remote_cursor = 0;
+                self.remote_pty_dims = None;
+                eprintln!("[remote] phone reconnected (gen={gen}), resending all {} blocks", self.blocks.len());
+                self.broadcast_tab_list();
+            }
             let mut inbox = vec![];
             hub.poll_inbound(&mut inbox);
             for msg in inbox {
                 match msg {
                     beyonder_remote::ClientMsg::Prompt { text } => remote_prompts.push(text),
-                    beyonder_remote::ClientMsg::RunCommand { cmd } => {
-                        // Route shell commands through the same path as typed input.
-                        remote_prompts.push(cmd);
+                    beyonder_remote::ClientMsg::RunCommand { cmd } => remote_shell.push(cmd),
+                    beyonder_remote::ClientMsg::PtyInput { bytes } => remote_pty_input.push(bytes),
+                    beyonder_remote::ClientMsg::PtyResize { cols, rows } => {
+                        eprintln!("[remote] PtyResize {cols}x{rows}");
+                        remote_pty_resize = Some((cols, rows));
                     }
                     beyonder_remote::ClientMsg::Interrupt => remote_interrupt = true,
+                    beyonder_remote::ClientMsg::SwitchTab { index } => remote_switch_tab = Some(index),
+                    beyonder_remote::ClientMsg::NewTab => remote_new_tab = true,
+                    beyonder_remote::ClientMsg::CloseTab => remote_close_tab = true,
                     beyonder_remote::ClientMsg::ToolHint { .. }
                     | beyonder_remote::ClientMsg::Auth { .. }
                     | beyonder_remote::ClientMsg::Ping { .. } => {}
                 }
             }
-            // Broadcast any blocks we haven't sent yet. Running blocks get
-            // re-broadcast each tick so streaming text stays current on phone.
+            // Live PTY mirror — throttled to ~3fps to keep payload manageable.
+            if self.remote_last_pty_frame.elapsed() >= std::time::Duration::from_millis(333) {
+                self.remote_last_pty_frame = std::time::Instant::now();
+                let mut cells: Vec<Vec<beyonder_remote::PtyCell>> = self
+                    .term_grid
+                    .cell_grid()
+                    .into_iter()
+                    .map(|row| row.into_iter().map(|c| {
+                        let to_u8 = |f: f32| (f.clamp(0.0, 1.0) * 255.0) as u8;
+                        beyonder_remote::PtyCell {
+                            g: c.grapheme,
+                            fg: [to_u8(c.fg[0]), to_u8(c.fg[1]), to_u8(c.fg[2])],
+                            bg: c.bg.map(|b| [to_u8(b[0]), to_u8(b[1]), to_u8(b[2])]),
+                            bold: c.bold,
+                        }
+                    }).collect())
+                    .collect();
+                // Trim trailing blank rows to reduce payload size.
+                while let Some(last) = cells.last() {
+                    let blank = last.iter().all(|c| {
+                        (c.g.is_empty() || c.g == " ") && !c.bold && c.bg.is_none()
+                    });
+                    if blank { cells.pop(); } else { break; }
+                }
+                let (cur_row, cur_col) = self.term_grid.cursor_pos();
+                let _ = hub.send(beyonder_remote::ServerMsg::PtyFrame(
+                    beyonder_remote::PtyFrame {
+                        cols: self.term_grid.cols as u16,
+                        rows: self.term_grid.rows as u16,
+                        cursor_col: cur_col as u16,
+                        cursor_row: cur_row as u16,
+                        cells,
+                    },
+                ));
+            }
+
+            // Broadcast any blocks we haven't sent yet. Cap per-tick to avoid
+            // overflowing the broadcast channel during history replay.
             let len = self.blocks.len();
-            for idx in self.remote_cursor..len {
+            let batch_end = len.min(self.remote_cursor + 200);
+            for idx in self.remote_cursor..batch_end {
                 let block = self.blocks[idx].clone();
                 let _ = hub.send(beyonder_remote::ServerMsg::BlockAppended(block));
             }
             // Advance cursor past any completed blocks at the tail.
-            while self.remote_cursor < len {
+            while self.remote_cursor < batch_end {
                 let b = &self.blocks[self.remote_cursor];
                 if matches!(b.status, BlockStatus::Running) {
-                    // Re-broadcast the still-running block so the phone sees
-                    // the latest content on the next tick.
                     let _ = hub.send(beyonder_remote::ServerMsg::BlockAppended(b.clone()));
                     break;
                 }
                 self.remote_cursor += 1;
             }
         }
+        if remote_new_tab {
+            self.new_tab();
+        }
+        if remote_close_tab {
+            self.close_tab();
+        }
+        if let Some(idx) = remote_switch_tab {
+            self.switch_tab(idx);
+        }
         if remote_interrupt {
             self.supervisor.reset_all_conversations();
         }
+        if let Some((cols, rows)) = remote_pty_resize {
+            self.remote_pty_dims = Some((cols, rows));
+        }
+        if let Some((cols, rows)) = self.remote_pty_dims {
+            // Apply every tick — window resize events keep trying to override.
+            if self.term_grid.cols != cols as usize || self.term_grid.rows != rows as usize {
+                self.term_grid.resize(cols as usize, rows as usize);
+                self.block_builder.set_grid_size(cols as usize, rows as usize);
+                if let Some(pty) = &self.pty {
+                    let _ = pty.resize(rows, cols);
+                }
+            }
+        }
+        for bytes in remote_pty_input {
+            if let Some(pty) = &mut self.pty {
+                let _ = pty.write(&bytes);
+            }
+        }
+        for cmd in remote_shell {
+            if cmd.starts_with('/') {
+                self.handle_command(&cmd).await;
+            } else {
+                self.send_to_shell(cmd).await;
+            }
+        }
+        // Phone-side Prompt messages are ignored — the agent runs on the
+        // phone, not the terminal. Only RunCommand (shell execution) is
+        // accepted from the phone. This prevents accidental agent invocation
+        // on the Mac when the phone sends legacy Prompt messages.
         for text in remote_prompts {
             if text.starts_with('/') {
                 self.handle_command(&text).await;
             } else {
-                let name = self.active_provider.clone();
-                self.prompt_agent(&name, text).await;
+                eprintln!("[remote] ignoring Prompt from phone (agent runs on phone): {}", &text[..text.len().min(80)]);
             }
         }
     }

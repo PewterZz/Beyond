@@ -31,6 +31,7 @@ pub struct ServerHandle {
     /// Inbound messages from any connected client.
     pub inbound_rx: Arc<Mutex<mpsc::UnboundedReceiver<ClientMsg>>>,
     pub connected: Arc<std::sync::atomic::AtomicBool>,
+    pub connect_gen: Arc<std::sync::atomic::AtomicU64>,
     _shutdown: mpsc::Sender<()>,
 }
 
@@ -48,13 +49,15 @@ pub async fn start(cfg: ServerConfig) -> Result<ServerHandle> {
         .with_context(|| format!("bind remote server on {}", cfg.bind))?;
     let port = listener.local_addr()?.port();
 
-    let (outbound_tx, _) = broadcast::channel::<ServerMsg>(512);
+    let (outbound_tx, _) = broadcast::channel::<ServerMsg>(4096);
     let (inbound_tx, inbound_rx) = mpsc::unbounded_channel::<ClientMsg>();
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
     let connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let connect_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     let outbound_tx_c = outbound_tx.clone();
     let connected_c = connected.clone();
+    let connect_gen_c = connect_gen.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -81,8 +84,10 @@ pub async fn start(cfg: ServerConfig) -> Result<ServerHandle> {
                                 active_model: cfg.active_model.clone(),
                                 active_provider: cfg.active_provider.clone(),
                             };
+                            let gen = connect_gen_c.clone();
                             tokio::spawn(async move {
                                 connected.store(true, std::sync::atomic::Ordering::Relaxed);
+                                gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 if let Err(e) = handle_client(stream, addr, token, hello, ob, ib).await {
                                     warn!("remote: client {addr} ended: {e}");
                                 }
@@ -101,6 +106,7 @@ pub async fn start(cfg: ServerConfig) -> Result<ServerHandle> {
         outbound: outbound_tx,
         inbound_rx: Arc::new(Mutex::new(inbound_rx)),
         connected,
+        connect_gen,
         _shutdown: shutdown_tx,
     })
 }

@@ -48,6 +48,43 @@ pub enum ServerMsg {
     Error {
         message: String,
     },
+    /// Live PTY frame mirror — full-screen snapshot of the Mac terminal grid.
+    /// Phone renders this directly so TUIs (vim, claude, htop, etc.) work.
+    PtyFrame(PtyFrame),
+    /// Full list of tabs — sent on connect and whenever tabs change.
+    TabList(TabList),
+    /// Active tab changed (index into the tab list).
+    TabSwitched { index: usize },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TabList {
+    pub tabs: Vec<TabInfo>,
+    pub active: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TabInfo {
+    pub index: usize,
+    pub title: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyFrame {
+    pub cols: u16,
+    pub rows: u16,
+    pub cursor_col: u16,
+    pub cursor_row: u16,
+    pub cells: Vec<Vec<PtyCell>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyCell {
+    pub g: String,
+    pub fg: [u8; 3],
+    pub bg: Option<[u8; 3]>,
+    pub bold: bool,
 }
 
 /// Phone → server.
@@ -66,6 +103,18 @@ pub enum ClientMsg {
     /// Interrupt the current in-flight agent turn.
     Interrupt,
     Ping { nonce: u64 },
+    /// Raw bytes to write to the Mac PTY stdin (individual keystrokes,
+    /// including ANSI escape sequences for arrows / Ctrl-keys).
+    PtyInput { bytes: Vec<u8> },
+    /// Phone tells the Mac to resize the PTY + TermGrid to dims that fit
+    /// the phone screen. TUIs re-render to the new size.
+    PtyResize { cols: u16, rows: u16 },
+    /// Phone requests switching to a different tab.
+    SwitchTab { index: usize },
+    /// Phone requests opening a new tab.
+    NewTab,
+    /// Phone requests closing the active tab.
+    CloseTab,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -15,8 +15,8 @@ pub mod protocol;
 pub mod server;
 pub mod transport;
 
-pub use pairing::PairingSecret;
-pub use protocol::{ClientMsg, ContentPatch, Hello, ServerMsg};
+pub use pairing::{PairingSecret, QrBitmap};
+pub use protocol::{ClientMsg, ContentPatch, Hello, PtyCell, PtyFrame, ServerMsg, TabInfo, TabList};
 pub use transport::{detect_tailscale_host, NgrokTunnel};
 
 use anyhow::Result;
@@ -29,9 +29,11 @@ pub struct RemoteHub {
     outbound: broadcast::Sender<ServerMsg>,
     inbound_rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<ClientMsg>>>,
     connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    connect_gen: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Current pairing URL reflecting the active endpoint (LAN / tailnet / ngrok).
     pub pairing_url: String,
     pub qr_ascii: String,
+    pub qr_bitmap: QrBitmap,
     pub endpoint_label: String,
     secret: PairingSecret,
     _mdns: Option<mdns::MdnsHandle>,
@@ -61,6 +63,9 @@ impl RemoteHub {
         let qr_ascii = secret
             .qr_ascii(&host, handle.port, false)
             .unwrap_or_default();
+        let qr_bitmap = secret
+            .qr_bitmap(&host, handle.port, false)
+            .unwrap_or(QrBitmap { width: 0, modules: vec![] });
 
         let mdns = mdns::MdnsHandle::announce(handle.port, "beyonder").ok();
         if mdns.is_none() {
@@ -72,8 +77,10 @@ impl RemoteHub {
             outbound: handle.outbound.clone(),
             inbound_rx: handle.inbound_rx.clone(),
             connected: handle.connected.clone(),
+            connect_gen: handle.connect_gen.clone(),
             pairing_url,
             qr_ascii,
+            qr_bitmap,
             endpoint_label: format!("lan ({host})"),
             secret,
             _mdns: mdns,
@@ -86,6 +93,10 @@ impl RemoteHub {
         self.connected.load(Ordering::Relaxed)
     }
 
+    pub fn connect_generation(&self) -> u64 {
+        self.connect_gen.load(Ordering::Relaxed)
+    }
+
     /// Rewrite the pairing URL + QR for a new endpoint. The bound port and
     /// token stay the same; only what the phone dials changes.
     pub fn set_endpoint(&mut self, host: &str, port: u16, tls: bool, label: String) {
@@ -94,6 +105,10 @@ impl RemoteHub {
             .secret
             .qr_ascii(host, port, tls)
             .unwrap_or_default();
+        self.qr_bitmap = self
+            .secret
+            .qr_bitmap(host, port, tls)
+            .unwrap_or(QrBitmap { width: 0, modules: vec![] });
         self.endpoint_label = label;
     }
 
