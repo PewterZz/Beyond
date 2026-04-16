@@ -835,8 +835,12 @@ impl App {
             None => return, // shouldn't happen
         };
         let displaced = self.exchange_active(target);
-        self.tabs[self.active_tab] = Some(displaced);
+        // Store the old active tab's state in the slot we just emptied, not
+        // the currently-active slot (which would leave tabs[idx] as None and
+        // make the tab unreachable on the next switch).
+        let prev = self.active_tab;
         self.active_tab = idx;
+        self.tabs[prev] = Some(displaced);
         self.remote_cursor = 0;
         self.resync_renderer_after_tab_switch();
         self.broadcast_tab_list();
