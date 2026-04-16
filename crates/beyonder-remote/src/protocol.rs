@@ -177,6 +177,34 @@ pub struct ContentPatch {
     pub text_append: Option<String>,
 }
 
+/// Magic byte prefixed to zstd-compressed frames.
+pub const ZSTD_MAGIC: u8 = 0xFF;
+
+/// Compress a CBOR payload with zstd, returning magic-prefixed bytes.
+/// Returns `None` if compression doesn't save space.
+pub fn compress_cbor(cbor: &[u8], level: i32) -> Option<Vec<u8>> {
+    let compressed = zstd::encode_all(cbor, level).ok()?;
+    if compressed.len() + 1 < cbor.len() {
+        let mut out = Vec::with_capacity(1 + compressed.len());
+        out.push(ZSTD_MAGIC);
+        out.extend_from_slice(&compressed);
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Decompress a potentially zstd-compressed frame. If the first byte is
+/// `ZSTD_MAGIC`, strips it and decompresses; otherwise returns the input as-is.
+pub fn decompress_frame(bytes: &[u8]) -> std::io::Result<std::borrow::Cow<'_, [u8]>> {
+    if bytes.first() == Some(&ZSTD_MAGIC) {
+        let decompressed = zstd::decode_all(&bytes[1..])?;
+        Ok(std::borrow::Cow::Owned(decompressed))
+    } else {
+        Ok(std::borrow::Cow::Borrowed(bytes))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,5 +286,82 @@ mod tests {
         });
         let bytes = ciborium::into_writer(&msg, Vec::new());
         assert!(bytes.is_ok(), "CBOR serialization should succeed");
+    }
+
+    #[test]
+    fn zstd_compress_roundtrips_pty_frame() {
+        let frame = PtyFrame {
+            cols: 80,
+            rows: 24,
+            cursor_col: 0,
+            cursor_row: 0,
+            cells: grid(24, 80, " "),
+        };
+        let msg = ServerMsg::PtyFrame(frame);
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&msg, &mut cbor).unwrap();
+
+        let compressed = compress_cbor(&cbor, 1).expect("frame should compress");
+        assert!(
+            compressed.len() < cbor.len(),
+            "compressed ({}) should be smaller than raw ({})",
+            compressed.len(),
+            cbor.len()
+        );
+        assert_eq!(compressed[0], ZSTD_MAGIC);
+
+        let decompressed = decompress_frame(&compressed).unwrap();
+        assert_eq!(decompressed.as_ref(), cbor.as_slice());
+    }
+
+    #[test]
+    fn zstd_passthrough_for_small_payloads() {
+        let msg = ServerMsg::Pong { nonce: 42 };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&msg, &mut cbor).unwrap();
+        // Small payload — compression shouldn't help.
+        let result = compress_cbor(&cbor, 1);
+        // Either None (not worth it) or still valid.
+        if let Some(compressed) = result {
+            let decompressed = decompress_frame(&compressed).unwrap();
+            assert_eq!(decompressed.as_ref(), cbor.as_slice());
+        }
+    }
+
+    #[test]
+    fn decompress_frame_returns_raw_when_no_magic() {
+        let raw = vec![0xA2, 0x01, 0x02]; // arbitrary non-magic bytes
+        let result = decompress_frame(&raw).unwrap();
+        assert_eq!(result.as_ref(), raw.as_slice());
+    }
+
+    #[test]
+    fn zstd_compression_ratio_on_typical_frame() {
+        // Simulate a typical terminal frame with repeated whitespace — should
+        // compress very well, proving bandwidth savings for the phone link.
+        let mut frame_cells = grid(24, 80, " ");
+        // Add some text on a few lines to be realistic.
+        for (i, ch) in "$ cargo build --release".chars().enumerate() {
+            frame_cells[0][i] = cell(&ch.to_string(), false);
+        }
+        for (i, ch) in "   Compiling beyonder v0.1.0".chars().enumerate() {
+            frame_cells[1][i] = cell(&ch.to_string(), false);
+        }
+        let msg = ServerMsg::PtyFrame(PtyFrame {
+            cols: 80,
+            rows: 24,
+            cursor_col: 0,
+            cursor_row: 2,
+            cells: frame_cells,
+        });
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&msg, &mut cbor).unwrap();
+        let compressed = compress_cbor(&cbor, 1).expect("should compress");
+        let ratio = compressed.len() as f64 / cbor.len() as f64;
+        assert!(
+            ratio < 0.25,
+            "typical mostly-blank frame should compress >4x, got {:.1}x (ratio {ratio:.3})",
+            1.0 / ratio
+        );
     }
 }

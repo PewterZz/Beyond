@@ -146,13 +146,18 @@ async fn handle_client(
         }
     };
     if !authed {
-        let _ = sink.send(encode_server(&ServerMsg::Error { message: "auth failed".into() }))
+        let _ = sink
+            .send(encode_server(&ServerMsg::Error {
+                message: "auth failed".into(),
+            }))
             .await;
         return Ok(());
     }
 
     // Greet.
-    sink.send(encode_server(&ServerMsg::Hello(hello))).await.ok();
+    sink.send(encode_server(&ServerMsg::Hello(hello)))
+        .await
+        .ok();
 
     let mut rx = outbound.subscribe();
     let mut ping_tick = tokio::time::interval(tokio::time::Duration::from_secs(15));
@@ -203,14 +208,41 @@ async fn handle_client(
     Ok(())
 }
 
+/// Magic byte prefixed to zstd-compressed frames so the phone can distinguish
+/// compressed from raw CBOR. Raw CBOR never starts with 0xFF (it's the CBOR
+/// "break" code which is invalid at top level).
+const ZSTD_MAGIC: u8 = 0xFF;
+
+/// Compression level — 1 is fastest, good enough for sub-ms at PTY frame sizes.
+const ZSTD_LEVEL: i32 = 1;
+
+/// Minimum CBOR payload size to bother compressing. Below this the zstd framing
+/// overhead can actually make the message larger.
+const COMPRESS_THRESHOLD: usize = 128;
+
 fn encode_server(msg: &ServerMsg) -> Message {
-    let mut buf = Vec::with_capacity(256);
-    if ciborium::into_writer(msg, &mut buf).is_err() {
+    let mut cbor = Vec::with_capacity(256);
+    if ciborium::into_writer(msg, &mut cbor).is_err() {
         return Message::Binary(vec![]);
     }
-    Message::Binary(buf)
+    if cbor.len() >= COMPRESS_THRESHOLD {
+        if let Ok(compressed) = zstd::encode_all(cbor.as_slice(), ZSTD_LEVEL) {
+            if compressed.len() + 1 < cbor.len() {
+                let mut out = Vec::with_capacity(1 + compressed.len());
+                out.push(ZSTD_MAGIC);
+                out.extend_from_slice(&compressed);
+                return Message::Binary(out);
+            }
+        }
+    }
+    Message::Binary(cbor)
 }
 
 fn decode_client(bytes: &[u8]) -> Result<ClientMsg> {
-    ciborium::from_reader(bytes).context("cbor decode ClientMsg")
+    if bytes.first() == Some(&ZSTD_MAGIC) {
+        let decompressed = zstd::decode_all(&bytes[1..]).context("zstd decompress ClientMsg")?;
+        ciborium::from_reader(decompressed.as_slice()).context("cbor decode ClientMsg")
+    } else {
+        ciborium::from_reader(bytes).context("cbor decode ClientMsg")
+    }
 }
