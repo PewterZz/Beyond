@@ -77,6 +77,7 @@ fn file_url_to_path(url: &str) -> Option<PathBuf> {
 }
 
 /// Shell-quote a path for safe interpolation into a command string.
+#[allow(dead_code)]
 fn shell_quote(path: &std::path::Path) -> String {
     let s = path.to_string_lossy();
     // Single-quote wrap; replace any single quote with '"'"'
@@ -102,12 +103,15 @@ fn find_editor() -> Option<String> {
 }
 
 /// Spawn a *separate beyondtty window* — a new OS process running this same
-/// binary — pre-loaded to run `editor <path>` inside a compact window.
+/// binary — in "editor-only skeleton" mode: no tab bar, no input bar, just
+/// the editor running full-window in a compact popup.
 ///
-/// The child reads `BEYONDER_WINDOW_SIZE` for its initial dimensions and
-/// `BEYONDER_INITIAL_CMD` for the command to run in its first tab's shell;
-/// both env vars are consumed and cleared on the child side so they don't
-/// leak into sub-shells or new tabs.
+/// The child reads:
+///   - `BEYONDER_WINDOW_SIZE` → initial window dimensions (WxH)
+///   - `BEYONDER_EDIT_PATH`   → raw file path to open (no shell quoting)
+///   - `BEYONDER_EDITOR`      → editor binary to exec (defaults to nvim/vim/nano)
+///
+/// All three are consumed and cleared on the child side so they don't leak.
 fn spawn_editor_window(editor: &str, path: &std::path::Path) -> anyhow::Result<&'static str> {
     use std::process::{Command, Stdio};
 
@@ -119,12 +123,11 @@ fn spawn_editor_window(editor: &str, path: &std::path::Path) -> anyhow::Result<&
 
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("could not resolve current executable: {e}"))?;
-    let quoted = shell_quote(path);
-    let initial_cmd = format!("{editor} {quoted}");
 
     Command::new(&exe)
         .env("BEYONDER_WINDOW_SIZE", format!("{WIN_W}x{WIN_H}"))
-        .env("BEYONDER_INITIAL_CMD", &initial_cmd)
+        .env("BEYONDER_EDIT_PATH", path.as_os_str())
+        .env("BEYONDER_EDITOR", editor)
         // Detach stdio so the child doesn't block on the parent's closed fds
         // and doesn't scribble over the parent's log stream.
         .stdin(Stdio::null())
@@ -622,6 +625,10 @@ pub struct App {
     /// Proxy to wake the winit event loop from async event sources (PTY, agent, broker).
     event_loop_proxy: EventLoopProxy<()>,
     remote_connect_gen: u64,
+    /// True in "editor-only skeleton" child windows: no tabs, no input bar, no
+    /// shell — just nvim running full-window. Closing the editor closes the
+    /// window.
+    pub editor_only: bool,
 }
 
 impl App {
@@ -656,55 +663,109 @@ impl App {
             let _ = wake_proxy_sup.send_event(());
         }));
 
+        // `BEYONDER_EDIT_PATH` puts this window into editor-only skeleton mode:
+        // no tab bar, no input bar, PTY runs nvim (or $VISUAL/$EDITOR) directly
+        // with no shell wrapping. Used by the click-to-nvim popup flow.
+        let editor_only_path = std::env::var("BEYONDER_EDIT_PATH").ok().and_then(|s| {
+            // SAFETY: set once on startup before any async task starts.
+            unsafe {
+                std::env::remove_var("BEYONDER_EDIT_PATH");
+            }
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(s)
+            }
+        });
+        let editor_only = editor_only_path.is_some();
+        if editor_only {
+            renderer.editor_only = true;
+            renderer.tui_active = true;
+        }
+
         // Calculate PTY dimensions from the renderer — single source of truth.
-        let (pty_cols, pty_rows) = renderer.terminal_grid_size();
+        let (pty_cols, pty_rows) = if editor_only {
+            renderer.tui_grid_size()
+        } else {
+            renderer.terminal_grid_size()
+        };
 
         let mut block_builder = BlockBuilder::new(session_id.clone(), cwd.clone());
         block_builder.set_grid_size(pty_cols as usize, pty_rows as usize);
 
         let term_grid = TermGrid::new(pty_cols as usize, pty_rows as usize);
 
-        // Spawn the shell PTY.
-        let shell_env = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let shell = config.shell.program.as_deref().unwrap_or(&shell_env);
-
         let wake_proxy = event_loop_proxy.clone();
         let wake_fn: beyonder_terminal::pty::WakeFn = Box::new(move || {
             let _ = wake_proxy.send_event(());
         });
-        let pty = match PtySession::spawn_sized_with_wake(
-            session_id.clone(),
-            shell,
-            &cwd,
-            &[],
-            pty_cols,
-            pty_rows,
-            wake_fn,
-        ) {
-            Ok(mut p) => {
-                info!("Shell PTY spawned");
-                // `BEYONDER_INITIAL_CMD` lets a parent process preload a command
-                // into the first tab's shell (e.g. `nvim /path/to/file` from the
-                // file-link-click popup flow). The shell reads it once it finishes
-                // sourcing rc files and prints its prompt.
-                if let Ok(cmd) = std::env::var("BEYONDER_INITIAL_CMD") {
-                    if !cmd.trim().is_empty() {
-                        let line = format!("{}\n", cmd.trim_end_matches('\n'));
-                        if let Err(e) = p.write(line.as_bytes()) {
-                            warn!("Failed to write BEYONDER_INITIAL_CMD to PTY: {e}");
+
+        let pty = if let Some(path) = editor_only_path {
+            // Editor-only: exec the editor directly, no shell hooks, no rc files.
+            let editor = std::env::var("BEYONDER_EDITOR")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(find_editor)
+                .unwrap_or_else(|| "nvim".to_string());
+            // SAFETY: called before any async task can observe env state.
+            unsafe {
+                std::env::remove_var("BEYONDER_EDITOR");
+            }
+            match PtySession::spawn_exec_sized_with_wake(
+                session_id.clone(),
+                &editor,
+                &[path.as_str()],
+                &cwd,
+                &[],
+                pty_cols,
+                pty_rows,
+                wake_fn,
+            ) {
+                Ok(p) => {
+                    info!("Editor PTY spawned: {editor} {path}");
+                    Some(p)
+                }
+                Err(e) => {
+                    warn!("Failed to spawn editor PTY: {e}");
+                    None
+                }
+            }
+        } else {
+            // Spawn the shell PTY.
+            let shell_env = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let shell = config.shell.program.as_deref().unwrap_or(&shell_env);
+            match PtySession::spawn_sized_with_wake(
+                session_id.clone(),
+                shell,
+                &cwd,
+                &[],
+                pty_cols,
+                pty_rows,
+                wake_fn,
+            ) {
+                Ok(mut p) => {
+                    info!("Shell PTY spawned");
+                    // `BEYONDER_INITIAL_CMD` lets a parent process preload a
+                    // command into the first tab's shell. Preserved for legacy
+                    // callers that still use it instead of BEYONDER_EDIT_PATH.
+                    if let Ok(cmd) = std::env::var("BEYONDER_INITIAL_CMD") {
+                        if !cmd.trim().is_empty() {
+                            let line = format!("{}\n", cmd.trim_end_matches('\n'));
+                            if let Err(e) = p.write(line.as_bytes()) {
+                                warn!("Failed to write BEYONDER_INITIAL_CMD to PTY: {e}");
+                            }
+                        }
+                        // SAFETY: called before any async task can observe env state.
+                        unsafe {
+                            std::env::remove_var("BEYONDER_INITIAL_CMD");
                         }
                     }
-                    // Consume the var so later `new_tab` shells don't repeat it.
-                    // SAFETY: called before any async task can observe env state.
-                    unsafe {
-                        std::env::remove_var("BEYONDER_INITIAL_CMD");
-                    }
+                    Some(p)
                 }
-                Some(p)
-            }
-            Err(e) => {
-                warn!("Failed to spawn PTY: {e}");
-                None
+                Err(e) => {
+                    warn!("Failed to spawn PTY: {e}");
+                    None
+                }
             }
         };
 
@@ -827,6 +888,7 @@ impl App {
             remote_prev_cells: vec![],
             remote_connect_gen: 0,
             event_loop_proxy,
+            editor_only,
         })
     }
 
@@ -3031,6 +3093,12 @@ impl App {
 
         // If the PTY process died, force-complete any running block.
         if let Some(exit_code) = pty_exited {
+            // In editor-only skeleton mode there's no shell to return to —
+            // the window exists solely to host the editor, so closing the
+            // editor closes the window.
+            if self.editor_only {
+                self.should_quit = true;
+            }
             if let Some(event) = self.block_builder.force_complete(exit_code) {
                 self.handle_build_event(event);
             }
@@ -3676,7 +3744,9 @@ impl App {
             .unwrap_or(false);
 
         // Full-screen TUI takeover: alt-screen apps OR known interactive CLIs.
-        self.renderer.tui_active = self.term_grid.tui_active() || interactive_cli;
+        // Editor-only skeleton windows are always TUI-active.
+        self.renderer.tui_active =
+            self.editor_only || self.term_grid.tui_active() || interactive_cli;
         self.renderer.tui_cursor_shape = self.term_grid.cursor_shape_code();
 
         // Tell renderer which block (if any) is the live running command.

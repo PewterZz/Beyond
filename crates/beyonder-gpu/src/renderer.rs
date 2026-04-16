@@ -146,6 +146,10 @@ pub struct Renderer {
     pub input_running: bool,
 
     pub tui_active: bool,
+    /// When true, the renderer is in "editor-only skeleton" mode: no tab bar,
+    /// no input bar, full window handed to the TUI. Used for the click-to-nvim
+    /// popup window spawned from file-link clicks.
+    pub editor_only: bool,
     pub tui_cells: Vec<Vec<TuiCell>>,
     pub tui_cursor: (usize, usize),
     /// Cursor shape requested by the TUI app (0=block, 1=beam, 2=underline).
@@ -457,6 +461,7 @@ impl Renderer {
             selected_sub_output: false,
             input_running: false,
             tui_active: false,
+            editor_only: false,
             tui_cells: vec![],
             tui_cursor: (0, 0),
             tui_cursor_shape: 0,
@@ -547,7 +552,11 @@ impl Renderer {
 
     /// Physical-pixel height of the tab strip. Zero when fewer than 2 tabs.
     /// Visible even during TUI mode so users can switch tabs while claude-code runs.
+    /// Editor-only skeleton mode suppresses it entirely.
     pub fn tab_bar_height_phys(&self) -> f32 {
+        if self.editor_only {
+            return 0.0;
+        }
         if self.tab_labels.len() >= 2 {
             TAB_BAR_HEIGHT * self.scale_factor
         } else {
@@ -1191,6 +1200,13 @@ impl Renderer {
     /// Recompute `computed_bar_h` and `input_scroll_px` based on current input state.
     /// Call once per frame before `append_bar_rects` and `build_bar_text_buffers`.
     fn compute_bar_state(&mut self) {
+        // Editor-only skeleton windows hand the entire surface to the TUI —
+        // there's no input bar to measure.
+        if self.editor_only {
+            self.computed_bar_h = 0.0;
+            self.input_scroll_px = 0.0;
+            return;
+        }
         let sc = self.scale_factor;
         let phys_font = self.font_size * sc;
         let win_w = self.surface_config.width as f32;

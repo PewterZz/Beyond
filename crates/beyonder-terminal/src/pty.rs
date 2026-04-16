@@ -236,6 +236,97 @@ impl PtySession {
         })
     }
 
+    /// Spawn a PTY running `program` directly with the given `args`, bypassing
+    /// all shell init hooks. Used for editor-only windows (e.g. click-to-nvim)
+    /// where we don't want rc files, OSC-133 prompt markers, or a login shell.
+    pub fn spawn_exec_sized_with_wake(
+        session_id: SessionId,
+        program: &str,
+        args: &[&str],
+        cwd: &PathBuf,
+        extra_env: &[(&str, &str)],
+        cols: u16,
+        rows: u16,
+        wake: WakeFn,
+    ) -> Result<Self> {
+        info!(program, cols, rows, "Spawning exec PTY");
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("Failed to open PTY")?;
+
+        let mut cmd = CommandBuilder::new(program);
+        cmd.cwd(cwd);
+        cmd.args(args);
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("TERM_PROGRAM", "iTerm.app");
+        cmd.env("LC_TERMINAL", "iTerm2");
+        cmd.env("LC_TERMINAL_VERSION", "3.5.0");
+        cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        cmd.env("BEYONDER_SESSION_ID", &session_id.0);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .context("Failed to spawn program")?;
+        let child = Arc::new(Mutex::new(child));
+        let writer = pair
+            .master
+            .take_writer()
+            .context("Failed to get PTY writer")?;
+
+        let (event_tx, event_rx) = mpsc::channel(1024);
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .context("Failed to clone PTY reader")?;
+        let child_clone = Arc::clone(&child);
+        let tx = event_tx.clone();
+        let wake = Some(wake);
+        std::thread::spawn(move || {
+            const BUF_SIZE: usize = 65536;
+            let mut buf = vec![0u8; BUF_SIZE];
+            loop {
+                match std::io::Read::read(&mut reader, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let _ = tx.blocking_send(PtyEvent::Output(buf[..n].to_vec()));
+                        if let Some(ref w) = wake {
+                            w();
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let code = child_clone
+                .lock()
+                .ok()
+                .and_then(|mut c| c.wait().ok())
+                .and_then(|s| if s.success() { Some(0) } else { None });
+            let _ = tx.blocking_send(PtyEvent::Exited(code));
+            if let Some(ref w) = wake {
+                w();
+            }
+        });
+
+        Ok(Self {
+            session_id,
+            master: pair.master,
+            writer,
+            child,
+            event_rx,
+        })
+    }
+
     /// Write bytes to the PTY (user keystrokes or command input).
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
         use std::io::Write;
