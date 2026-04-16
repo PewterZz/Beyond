@@ -360,7 +360,9 @@ fn parse_ansi_output(bytes: &[u8], cols: usize, rows: usize) -> TerminalOutput {
 
     let mut grid = TermGrid::new(cols, rows);
     grid.feed(bytes);
-    let cells = grid.cell_grid();
+    // Read scrollback + live screen so long outputs that scrolled past the
+    // PTY viewport are preserved in the finalized block.
+    let cells = grid.full_cell_grid();
 
     // Trim trailing blank rows.
     let last_content = cells.iter().rposition(|row| {

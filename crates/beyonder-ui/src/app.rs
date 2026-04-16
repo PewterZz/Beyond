@@ -30,6 +30,18 @@ use crate::mode_detector::{detect_mode, InputMode};
 
 // ── Context pill helpers ──────────────────────────────────────────────────────
 
+fn startup_cwd() -> PathBuf {
+    let cwd = std::env::current_dir().ok();
+    let from_launch_services = cwd.as_deref() == Some(std::path::Path::new("/"));
+    if cwd.is_none() || from_launch_services {
+        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+            let _ = std::env::set_current_dir(&home);
+            return home;
+        }
+    }
+    cwd.unwrap_or_else(|| PathBuf::from("/"))
+}
+
 fn current_conda_env() -> String {
     std::env::var("CONDA_DEFAULT_ENV").unwrap_or_else(|_| "—".to_string())
 }
@@ -508,7 +520,7 @@ impl App {
         std::fs::create_dir_all(&config.data_dir)?;
         let store = Store::open(&config.db_path())?;
 
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let cwd = startup_cwd();
         let session = Session::new(cwd.clone());
         let session_id = session.id.clone();
 
@@ -719,7 +731,12 @@ impl App {
     /// reflects the newly-active tab's state, and reshape the PTY / grid so the
     /// revived tab matches the current window size.
     fn resync_renderer_after_tab_switch(&mut self) {
-        let (cols, rows) = if self.term_grid.tui_active() {
+        let interactive_cli = self
+            .block_builder
+            .running_command_name()
+            .map(|name| matches!(name, "claude" | "claude-code"))
+            .unwrap_or(false);
+        let (cols, rows) = if self.term_grid.tui_active() || interactive_cli {
             self.renderer.tui_grid_size()
         } else {
             self.renderer.terminal_grid_size()
@@ -736,7 +753,15 @@ impl App {
         self.renderer.selected_sub_output = self.selected_sub_output;
         self.renderer.agent_running_tool = self.agent_running_tool.clone();
         self.renderer.running_block_idx = None;
-        self.renderer.tui_cells = vec![];
+        let is_live = self.block_builder.is_running_command()
+            || self.term_grid.tui_active()
+            || interactive_cli;
+        if is_live {
+            self.renderer.tui_cells = self.term_grid.cell_grid();
+            self.renderer.tui_cursor = self.term_grid.cursor_pos();
+        } else {
+            self.renderer.tui_cells = vec![];
+        }
         self.renderer.input_text = self.input.text.clone();
         self.renderer.viewport.scroll_to_bottom();
         self.renderer.snap_input_scroll_to_cursor();
@@ -744,7 +769,7 @@ impl App {
 
     /// Construct a fresh `TabState` — spawns a new PTY sized to the renderer.
     fn fresh_tab_state(&self, title: String) -> TabState {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let cwd = startup_cwd();
         let session = Session::new(cwd.clone());
         let session_id = session.id.clone();
         let _ = SessionStore::new(&self.store).insert(&session);

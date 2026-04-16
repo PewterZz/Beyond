@@ -545,9 +545,10 @@ impl Renderer {
             .update(&self.queue, Resolution { width, height });
     }
 
-    /// Physical-pixel height of the tab strip. Zero when fewer than 2 tabs or when a TUI app is active.
+    /// Physical-pixel height of the tab strip. Zero when fewer than 2 tabs.
+    /// Visible even during TUI mode so users can switch tabs while claude-code runs.
     pub fn tab_bar_height_phys(&self) -> f32 {
-        if self.tab_labels.len() >= 2 && !self.tui_active {
+        if self.tab_labels.len() >= 2 {
             TAB_BAR_HEIGHT * self.scale_factor
         } else {
             0.0
@@ -600,7 +601,7 @@ impl Renderer {
         );
         buf.shape_until_scroll(font_system, false);
 
-        let mut cell_w = (phys * 0.6).round();
+        let mut cell_w = phys * 0.6;
         let mut metrics_line_h = phys * 1.2; // fallback
         let mut cell_h = metrics_line_h.floor();
 
@@ -611,6 +612,8 @@ impl Renderer {
                     // floor() matches the integer pixel height swash rasterizes.
                     // Using ceil() would make rows 1px taller than glyphs, causing
                     // 1px gaps between adjacent box-drawing / block characters.
+                    // Descenders that extend past this are still drawn — bounds
+                    // are extended in build_tui_text_buffers / shell-output path.
                     cell_h = metrics_line_h.floor();
                 }
             }
@@ -619,7 +622,10 @@ impl Renderer {
             if let Some(last) = run.glyphs.last() {
                 let total_w = last.x + last.w;
                 let n = run.glyphs.len() as f32;
-                cell_w = (total_w / n).round();
+                // Keep as a float — rounding to an integer drifts vs the real
+                // shaped advance, which makes the TUI cursor slide off its cell
+                // at high column counts. Pixel alignment happens at positioning.
+                cell_w = total_w / n;
             }
         }
 
@@ -1228,8 +1234,9 @@ impl Renderer {
             return None;
         }
         let pad = TUI_PAD * self.scale_factor;
+        let tab_h = self.tab_bar_height_phys();
         let lx = px - pad;
-        let ly = py - pad;
+        let ly = py - pad - tab_h;
         if lx < 0.0 || ly < 0.0 {
             return None;
         }
@@ -1242,12 +1249,13 @@ impl Renderer {
         Some((c as u32 + 1, r as u32 + 1))
     }
 
-    /// Terminal grid dimensions for TUI fullscreen mode (bar hidden — full window).
+    /// Terminal grid dimensions for TUI fullscreen mode (bar hidden — full window below tab strip).
     pub fn tui_grid_size(&self) -> (u16, u16) {
         let (cell_w, cell_h) = self.terminal_cell_size();
         let pad = TUI_PAD * self.scale_factor;
+        let tab_h = self.tab_bar_height_phys();
         let full_w = (self.surface_config.width as f32 - pad * 2.0).max(cell_w);
-        let full_h = (self.surface_config.height as f32 - pad * 2.0).max(cell_h);
+        let full_h = (self.surface_config.height as f32 - pad * 2.0 - tab_h).max(cell_h);
         let cols = (full_w / cell_w).floor().max(40.0) as u16;
         let rows = (full_h / cell_h).floor().max(10.0) as u16;
         (cols, rows)
@@ -2177,17 +2185,19 @@ impl Renderer {
         self.link_rects.clear();
         let (cell_w, cell_h) = self.tui_cell_size();
         let pad = TUI_PAD * self.scale_factor;
+        // Tab strip (if visible) sits above the TUI area — shift origin down.
+        let top = pad + self.tab_bar_height_phys();
         // Bar is hidden in TUI mode — fill the full window (minus pad).
         let bar_y = self.surface_config.height as f32 - pad;
 
         for (row_idx, row) in self.tui_cells.iter().enumerate() {
-            let row_y = (pad + row_idx as f32 * cell_h).floor();
+            let row_y = (top + row_idx as f32 * cell_h).floor();
             if row_y >= bar_y {
                 break;
             }
             // Size the rect to exactly the gap to the next row's snapped y — plus 1px
             // overlap — so bg rects tile without sub-pixel black seams.
-            let next_y = (pad + (row_idx + 1) as f32 * cell_h).floor();
+            let next_y = (top + (row_idx + 1) as f32 * cell_h).floor();
             let rect_h = (next_y - row_y).max(1.0) + 1.0;
             if row.is_empty() {
                 continue;
@@ -2254,28 +2264,28 @@ impl Renderer {
                     let col = [fg[0], fg[1], fg[2], 1.0];
                     for sub in geom {
                         if sub.rounded {
-                            // Compute the circle's bounding square from the
-                            // shorter cell dimension so the dot stays round —
-                            // a rounded rect with unequal w/h renders as a pill.
-                            // 0.55 = visual match with iTerm/ghostty ⏺ sizing.
-                            let side = rect_w.min(rect_h) * 0.55;
+                            // Virtual disc bounding box in integer pixels so
+                            // sub-rect dims and the SDF corner radius match.
+                            // 0.55 ≈ iTerm/ghostty ⏺ sizing.
+                            let diameter = (rect_w.min(rect_h) * 0.55 * 2.0).round().max(2.0);
                             // sub.w / sub.h describe which fraction of the full
-                            // disc this sub-glyph covers. Scale the square by
-                            // those fractions and re-anchor within the cell.
-                            let sub_w_px = (sub.w * 2.0 * side).ceil();
-                            let sub_h_px = (sub.h * 2.0 * side).ceil();
+                            // disc this sub-glyph covers (0.5 × 1.0 = left half).
+                            let sub_w_px = (sub.w * diameter).round().max(1.0);
+                            let sub_h_px = (sub.h * diameter).round().max(1.0);
                             let cx = col_x + rect_w * 0.5;
                             let cy = row_y + rect_h * 0.5;
                             // sub.x/sub.y are in the full-disc reference frame
                             // (0..1 == left..right of the virtual bounding box).
                             // Shift them so 0.5 maps to the cell center.
-                            let sub_x = (cx + (sub.x - 0.5) * 2.0 * side).floor();
-                            let sub_y = (cy + (sub.y - 0.5) * 2.0 * side).floor();
+                            let sub_x = (cx + (sub.x - 0.5) * diameter).round();
+                            let sub_y = (cy + (sub.y - 0.5) * diameter).round();
                             let inst = RectInstance::filled(sub_x, sub_y, sub_w_px, sub_h_px, col);
-                            // Full radius = side (half of 2*side) for crisp
-                            // circles; half-discs become capsules which read
+                            // Radius == half of the smaller dim → full disc is
+                            // a true circle; half-discs render as capsules
+                            // (corner rounding = quarter-diameter) which read
                             // as animation frames.
-                            rects.push(inst.with_radius(side));
+                            let radius = sub_w_px.min(sub_h_px) * 0.5;
+                            rects.push(inst.with_radius(radius));
                         } else {
                             let sub_x = col_x + (sub.x * rect_w).floor();
                             let sub_y = row_y + (sub.y * rect_h).floor();
@@ -2289,42 +2299,37 @@ impl Renderer {
         }
         // Cursor — shape depends on what the TUI app requested.
         let (cur_row, cur_col) = self.tui_cursor;
-        let cx = (pad + cur_col as f32 * cell_w).floor();
-        let cy = (pad + cur_row as f32 * cell_h).floor();
-        if cy < bar_y {
+        // Derive width/height from the *adjacent* pixel cell so the cursor
+        // covers exactly one cell — needed because cell_w is fractional and
+        // cell widths alternate between floor/ceil at integer positions.
+        let cx0 = (pad + cur_col as f32 * cell_w).floor();
+        let cx1 = (pad + (cur_col + 1) as f32 * cell_w).floor();
+        let cw_px = (cx1 - cx0).max(1.0);
+        let cy0 = (top + cur_row as f32 * cell_h).floor();
+        let cy1 = (top + (cur_row + 1) as f32 * cell_h).floor();
+        let ch_px = (cy1 - cy0).max(1.0);
+        if cy0 < bar_y {
             let cursor_color = [0.804, 0.835, 0.918, 0.55_f32];
             match self.tui_cursor_shape {
                 1 => {
                     // Beam: 2 logical-px wide bar at left edge of cell.
                     let beam_w = (2.0 * self.scale_factor).max(2.0);
-                    rects.push(RectInstance::filled(
-                        cx,
-                        cy,
-                        beam_w,
-                        cell_h.ceil(),
-                        cursor_color,
-                    ));
+                    rects.push(RectInstance::filled(cx0, cy0, beam_w, ch_px, cursor_color));
                 }
                 2 => {
                     // Underline: thin bar at bottom of cell.
                     let ul_h = (2.0 * self.scale_factor).max(2.0);
                     rects.push(RectInstance::filled(
-                        cx,
-                        cy + cell_h.ceil() - ul_h,
-                        cell_w.ceil(),
+                        cx0,
+                        cy0 + ch_px - ul_h,
+                        cw_px,
                         ul_h,
                         cursor_color,
                     ));
                 }
                 _ => {
                     // Block (default).
-                    rects.push(RectInstance::filled(
-                        cx,
-                        cy,
-                        cell_w.ceil(),
-                        cell_h.ceil(),
-                        cursor_color,
-                    ));
+                    rects.push(RectInstance::filled(cx0, cy0, cw_px, ch_px, cursor_color));
                 }
             }
         }
@@ -2334,6 +2339,7 @@ impl Renderer {
         let (cell_w, cell_h) = self.tui_cell_size();
         let sc = self.scale_factor;
         let pad = TUI_PAD * sc;
+        let top = pad + self.tab_bar_height_phys();
         // Bar is hidden in TUI mode — fill the full window (minus pad).
         let bar_y = self.surface_config.height as f32 - pad;
         let phys_font = self.font_size * sc;
@@ -2346,7 +2352,7 @@ impl Renderer {
                 continue;
             }
             // Match the snapped y from layout_tui so text sits exactly on its bg rect.
-            let y = (pad + row_idx as f32 * cell_h).floor();
+            let y = (top + row_idx as f32 * cell_h).floor();
             if y >= bar_y {
                 break;
             }
@@ -2355,8 +2361,13 @@ impl Renderer {
             // with a fixed width, so advance-width mismatches for special chars (box-drawing,
             // Nerd Font icons) are contained and don't shift subsequent text rightward.
             let runs = self.make_tui_row_runs(row, cell_w, phys_font);
+            // TextArea bounds clip glyphs at (top+h). cell_h is floor(line_h)
+            // for tight box-drawing tiling — but descenders ("y", "g", "p")
+            // extend to ceil(line_h). Extend the bounds so they're not shaved.
+            // Adjacent rows' text is placed in their own bounds; overlap is fine.
+            let bounds_h = self.measured_metrics_line_h.ceil().max(cell_h) + 1.0;
             for (buf, x, w, color) in runs {
-                results.push((buf, pad + x, y, w, cell_h, color));
+                results.push((buf, pad + x, y, w, bounds_h, color));
             }
         }
         self.tui_cells = cells;
@@ -2520,6 +2531,7 @@ impl Renderer {
                 let output_pad_x = 4.0 * sc;
                 if self.running_block_idx == Some(block_idx) && !self.tui_cells.is_empty() {
                     let (cell_w, cell_h) = self.terminal_cell_size();
+                    let bounds_h = self.measured_metrics_line_h.ceil().max(cell_h) + 1.0;
                     let tui_cells = self.tui_cells.clone();
                     for (row_idx, row) in tui_cells.iter().enumerate() {
                         if row.is_empty() {
@@ -2531,7 +2543,7 @@ impl Renderer {
                         }
                         let runs = self.make_tui_row_runs(row, cell_w, phys_font);
                         for (buf, rx, w, color) in runs {
-                            results.push((buf, x + output_pad_x + rx, ry, w, cell_h, color));
+                            results.push((buf, x + output_pad_x + rx, ry, w, bounds_h, color));
                         }
                     }
                 } else {
@@ -2539,6 +2551,7 @@ impl Renderer {
                         BlockContent::ShellCommand { output, .. } => {
                             // Render per-cell with stored colors (preserves ANSI/TUI colors).
                             let (cell_w, cell_h) = self.terminal_cell_size();
+                            let bounds_h = self.measured_metrics_line_h.ceil().max(cell_h) + 1.0;
                             let content_x = x + output_pad_x;
                             let base_y = output_top + 2.0 * sc;
                             for (row_idx, row) in output.rows.iter().enumerate() {
@@ -2584,7 +2597,7 @@ impl Renderer {
                                     .collect();
                                 let runs = self.make_tui_row_runs(&tui_row, cell_w, phys_font);
                                 for (buf, rx, w, color) in runs {
-                                    results.push((buf, content_x + rx, row_y, w, cell_h, color));
+                                    results.push((buf, content_x + rx, row_y, w, bounds_h, color));
                                 }
                             }
                         }

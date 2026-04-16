@@ -195,15 +195,30 @@ impl TermGrid {
     /// Extract the full screen grid as TuiCells.
     pub fn cell_grid(&self) -> Vec<Vec<TuiCell>> {
         let rows = self.term.screen_lines();
-        let cols = self.term.columns();
-        let grid = self.term.grid();
         // Shift every read upward by display_offset so scrollback is visible.
         // 0 = live screen; positive = N lines back into history.
-        let offset = grid.display_offset() as i32;
-        let mut result = Vec::with_capacity(rows);
+        let offset = self.term.grid().display_offset() as i32;
+        self.build_rows(-offset, rows as i32 - offset)
+    }
 
-        for row_idx in 0..rows {
-            let line = Line(row_idx as i32 - offset);
+    /// Extract the live screen plus all scrollback history as TuiCells.
+    /// Used when finalizing a completed command block so output that scrolled
+    /// past the PTY viewport is preserved (not capped at `screen_lines`).
+    pub fn full_cell_grid(&self) -> Vec<Vec<TuiCell>> {
+        let rows = self.term.screen_lines();
+        let grid = self.term.grid();
+        let history = grid.total_lines().saturating_sub(rows) as i32;
+        self.build_rows(-history, rows as i32)
+    }
+
+    fn build_rows(&self, start_line: i32, end_line: i32) -> Vec<Vec<TuiCell>> {
+        let cols = self.term.columns();
+        let grid = self.term.grid();
+        let count = (end_line - start_line).max(0) as usize;
+        let mut result = Vec::with_capacity(count);
+
+        for line_val in start_line..end_line {
+            let line = Line(line_val);
             let mut row_cells = Vec::with_capacity(cols);
             for col_idx in 0..cols {
                 let col = Column(col_idx);
