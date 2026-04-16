@@ -14,7 +14,7 @@ CRATES=(
     beyonder-gpu
     beyonder-runtime
     beyonder-ui
-    beyonder
+    beyondtty
 )
 
 DRY_RUN="${DRY_RUN:-}"

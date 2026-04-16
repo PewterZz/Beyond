@@ -14,7 +14,7 @@ members = [
 resolver = "2"
 
 [package]
-name = "beyonder"
+name = "beyondtty"
 version.workspace = true
 edition.workspace = true
 description = "AI-native terminal with block-oriented model and GPU-accelerated rendering"
@@ -25,6 +25,14 @@ license = "GPL-3.0-or-later"
 keywords = ["terminal", "ai", "gpu", "wgpu", "agent"]
 categories = ["command-line-utilities", "graphics"]
 exclude = ["assets/", "Formula/", "run*.log", ".claude/"]
+
+[[bin]]
+name = "beyondtty"
+path = "src/main.rs"
+
+[[bin]]
+name = "beyonder"
+path = "src/main.rs"
 
 [workspace.package]
 version = "0.1.0"

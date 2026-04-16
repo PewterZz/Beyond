@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO="PewterZz/Beyond"
-BINARY="beyonder"
+BINARIES="beyondtty beyonder"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -60,7 +60,7 @@ main() {
         [ -n "$version" ] || err "Could not determine latest version. Set VERSION=x.y.z manually."
     fi
 
-    local tarball="${BINARY}-v${version}-${platform}.tar.gz"
+    local tarball="beyondtty-v${version}-${platform}.tar.gz"
     local url="https://github.com/${REPO}/releases/download/v${version}/${tarball}"
 
     info "Downloading Beyond v${version} for ${platform}..."
@@ -73,24 +73,25 @@ main() {
     info "Extracting..."
     tar -xzf "${tmpdir}/${tarball}" -C "$tmpdir"
 
-    if [ ! -f "${tmpdir}/${BINARY}" ]; then
-        err "Binary '${BINARY}' not found in archive"
-    fi
+    for bin in $BINARIES; do
+        if [ ! -f "${tmpdir}/${bin}" ]; then
+            err "Binary '${bin}' not found in archive"
+        fi
+        info "Installing ${bin} to ${INSTALL_DIR}/${bin}..."
+        if [ -w "$INSTALL_DIR" ]; then
+            mv "${tmpdir}/${bin}" "${INSTALL_DIR}/${bin}"
+        else
+            sudo mv "${tmpdir}/${bin}" "${INSTALL_DIR}/${bin}"
+        fi
+        chmod +x "${INSTALL_DIR}/${bin}"
+    done
 
-    info "Installing to ${INSTALL_DIR}/${BINARY}..."
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "${tmpdir}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
-    else
-        sudo mv "${tmpdir}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
-    fi
-    chmod +x "${INSTALL_DIR}/${BINARY}"
-
-    info "Beyond v${version} installed to ${INSTALL_DIR}/${BINARY}"
+    info "Beyond v${version} installed to ${INSTALL_DIR}"
     echo ""
-    echo "  Run 'beyonder' to launch."
+    echo "  Run 'beyondtty' or 'beyonder' to launch."
     echo ""
     echo "  Make sure you have a GPU that supports wgpu (Metal/Vulkan/DX12)"
-    echo "  and Ollama running ('ollama serve') for agent features."
+    echo "  and at least one LLM provider running for agent features."
 }
 
 main "$@"

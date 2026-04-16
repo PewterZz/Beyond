@@ -200,21 +200,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "beyonder"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "beyonder-config",
- "beyonder-ui",
- "image",
- "objc2 0.5.2",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "winit",
-]
-
-[[package]]
 name = "beyonder-acp"
 version = "0.1.0"
 dependencies = [
@@ -368,6 +353,21 @@ dependencies = [
  "tokio",
  "tracing",
  "wgpu",
+ "winit",
+]
+
+[[package]]
+name = "beyondtty"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "beyonder-config",
+ "beyonder-ui",
+ "image",
+ "objc2 0.5.2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "winit",
 ]
 

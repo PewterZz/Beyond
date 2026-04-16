@@ -37,14 +37,14 @@ VERSION=0.1.0 curl -fsSL https://raw.githubusercontent.com/PewterZz/Beyond/main/
 ### Cargo (from source)
 
 ```bash
-cargo install beyonder
+cargo install beyondtty
 ```
 
 ### Homebrew
 
 ```bash
 brew tap PewterZz/tap
-brew install beyond
+brew install beyondtty
 ```
 
 ### Build from source
@@ -53,13 +53,13 @@ brew install beyond
 git clone git@github.com:PewterZz/Beyond.git
 cd Beyond
 cargo build --release
-# Binary at target/release/beyonder
+# Binaries at target/release/beyondtty and target/release/beyonder
 ```
 
 ## Quick start
 
 ```bash
-beyonder
+beyondtty   # or beyonder — both work
 ```
 
 The window opens at 1280x800. Type shell commands normally, or `/help` for slash commands. `/agent spawn <name>` to start an agent.
