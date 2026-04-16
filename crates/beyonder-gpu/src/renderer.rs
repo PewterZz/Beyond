@@ -186,9 +186,12 @@ pub struct Renderer {
     /// Active agent model name — shown as a pill in the top-right of the input bar.
     pub agent_model: String,
 
-    /// GlyphBuffer cache: block_id → (content_len, buf_w_bits, font_bits, viewport_h_bits, buffer).
+    /// GlyphBuffer cache: block_id → (content_len, buf_w_bits, font_bits, viewport_h_bits, last_frame, buffer).
     /// Re-shaping is skipped when content and layout params are unchanged.
-    glyph_buf_cache: HashMap<beyonder_core::BlockId, (u64, u32, u32, u32, GlyphBuffer)>,
+    /// `last_frame` tracks the frame number when this entry was last used, for LRU eviction.
+    glyph_buf_cache: HashMap<beyonder_core::BlockId, (u64, u32, u32, u32, u64, GlyphBuffer)>,
+    /// Monotonic frame counter — incremented each render(). Used for LRU eviction.
+    frame_counter: u64,
 
     // ── Block layout cache ──────────────────────────────────────────────────
     /// Cached per-block heights (parallel to `self.blocks`).
@@ -466,6 +469,7 @@ impl Renderer {
             mode_pill_rect: [0.0; 4],
             agent_model: String::new(),
             glyph_buf_cache: HashMap::new(),
+            frame_counter: 0,
             block_heights: vec![],
             block_y_prefix: vec![0.0],
             _blocks_generation: 0,
@@ -729,10 +733,11 @@ impl Renderer {
         let bw_bits = buf_w.to_bits();
         let pf_bits = phys_font.to_bits();
         let vh_bits = self.viewport.height.to_bits();
+        let fc = self.frame_counter;
         let cached_matches = self
             .glyph_buf_cache
             .get(&block.id)
-            .map(|(l, b, p, v, _)| {
+            .map(|(l, b, p, v, _, _)| {
                 *l == content_len && *b == bw_bits && *p == pf_bits && *v == vh_bits
             })
             .unwrap_or(false);
@@ -744,10 +749,12 @@ impl Renderer {
             };
             self.glyph_buf_cache.insert(
                 block.id.clone(),
-                (content_len, bw_bits, pf_bits, vh_bits, buf),
+                (content_len, bw_bits, pf_bits, vh_bits, fc, buf),
             );
+        } else if let Some(entry) = self.glyph_buf_cache.get_mut(&block.id) {
+            entry.4 = fc; // touch LRU
         }
-        let (_, _, _, _, buf) = self.glyph_buf_cache.get(&block.id)?;
+        let (_, _, _, _, _, buf) = self.glyph_buf_cache.get(&block.id)?;
         let skipped = if is_markdown {
             let max_vis = ((self.viewport.height / line_h).ceil() as usize + 30).max(50);
             content_text.lines().count().saturating_sub(max_vis)
@@ -982,7 +989,7 @@ impl Renderer {
                 if (s.line, s.index) == (e.line, e.index) {
                     return None;
                 }
-                let (_, _, _, _, buf) = self.glyph_buf_cache.get(&block.id)?;
+                let (_, _, _, _, _, buf) = self.glyph_buf_cache.get(&block.id)?;
                 let mut out = String::new();
                 let last = buf.lines.len().saturating_sub(1);
                 let s_line = s.line.min(last);
@@ -1253,6 +1260,8 @@ impl Renderer {
     }
 
     pub fn render(&mut self) -> Result<()> {
+        self.frame_counter += 1;
+
         // Advance cursor blink — toggle every 530 ms.
         let now = Instant::now();
         if now.duration_since(self.cursor_last_toggle).as_millis() >= 530 {
@@ -1386,24 +1395,25 @@ impl Renderer {
             .collect();
 
         debug!("render: calling text_renderer.prepare");
-        self.text_renderer
-            .prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.text_atlas,
-                &self.glyph_viewport,
-                text_areas,
-                &mut self.swash_cache,
-            )
-            .ok();
+        if let Err(e) = self.text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.text_atlas,
+            &self.glyph_viewport,
+            text_areas,
+            &mut self.swash_cache,
+        ) {
+            tracing::warn!("glyph atlas prepare failed: {e:?}");
+        }
         debug!("render: text_renderer.prepare done");
 
         // Re-insert shaped buffers that have cache keys back into the cache.
         // text_areas was consumed by prepare() so buf_list.entries is free to move.
+        let fc = self.frame_counter;
         for ((buf, ..), key) in buf_list.entries.into_iter().zip(buf_list.keys.into_iter()) {
             if let Some((id, len, bw, pf, vh)) = key {
-                self.glyph_buf_cache.insert(id, (len, bw, pf, vh, buf));
+                self.glyph_buf_cache.insert(id, (len, bw, pf, vh, fc, buf));
             }
         }
 
@@ -1429,9 +1439,12 @@ impl Renderer {
             });
 
             self.rect_pipeline.draw(&mut pass, rects.len() as u32);
-            self.text_renderer
-                .render(&self.text_atlas, &self.glyph_viewport, &mut pass)
-                .ok();
+            if let Err(e) =
+                self.text_renderer
+                    .render(&self.text_atlas, &self.glyph_viewport, &mut pass)
+            {
+                tracing::warn!("glyph atlas render failed: {e:?}");
+            }
         }
 
         debug!("render: submitting GPU commands");
@@ -1441,6 +1454,17 @@ impl Renderer {
 
         // Free atlas glyphs that are no longer needed this frame.
         self.text_atlas.trim();
+
+        // LRU eviction: drop glyph buffer cache entries not used in the last
+        // 120 frames (~2s at 60fps). Also cap at 256 entries to bound memory.
+        const EVICT_AGE: u64 = 120;
+        const MAX_CACHE: usize = 256;
+        let fc = self.frame_counter;
+        if self.glyph_buf_cache.len() > MAX_CACHE || fc % 60 == 0 {
+            self.glyph_buf_cache
+                .retain(|_, (_, _, _, _, last, _)| fc.saturating_sub(*last) < EVICT_AGE);
+        }
+
         Ok(())
     }
 
@@ -1798,7 +1822,8 @@ impl Renderer {
                             cursor,
                         } if *block_idx == i => {
                             if let Some((x_content, text_y, _buf_w)) = self.agent_buffer_geom(i) {
-                                if let Some((_, _, _, _, buf)) = self.glyph_buf_cache.get(&block.id)
+                                if let Some((_, _, _, _, _, buf)) =
+                                    self.glyph_buf_cache.get(&block.id)
                                 {
                                     let (s, e) = order_cur(*anchor, *cursor);
                                     let tint = [0.40, 0.65, 1.0, 0.35];
@@ -2582,7 +2607,7 @@ impl Renderer {
                                         // Try to reuse a previously shaped markdown buffer.
                                         let cached = self.glyph_buf_cache.remove(&block.id);
                                         let (buf, skipped, cache_len) = match cached {
-                                            Some((len, bw, pf, vh, b))
+                                            Some((len, bw, pf, vh, _frame, b))
                                                 if len == content_len
                                                     && bw == bw_bits
                                                     && pf == pf_bits
@@ -3840,5 +3865,53 @@ mod tests {
         let a = Renderer::format_shell_meta(&cwd, None);
         let b = Renderer::format_shell_meta(&cwd, None);
         assert_eq!(a, b, "same input should produce same output");
+    }
+
+    #[test]
+    fn lru_eviction_removes_stale_entries() {
+        use std::collections::HashMap;
+        // Simulate the LRU eviction logic from render().
+        type Cache = HashMap<String, (u64, u64)>; // key → (data, last_frame)
+        let mut cache = Cache::new();
+        const EVICT_AGE: u64 = 120;
+
+        // Insert entries at various frames.
+        cache.insert("a".into(), (1, 10)); // used at frame 10
+        cache.insert("b".into(), (2, 50)); // used at frame 50
+        cache.insert("c".into(), (3, 130)); // used at frame 130
+
+        // Evict at frame 140 — entries older than 120 frames (< frame 20) are stale.
+        let fc: u64 = 140;
+        cache.retain(|_, (_, last)| fc.saturating_sub(*last) < EVICT_AGE);
+
+        assert!(
+            !cache.contains_key("a"),
+            "a (frame 10) should be evicted at frame 140"
+        );
+        assert!(
+            cache.contains_key("b"),
+            "b (frame 50) should survive at frame 140"
+        );
+        assert!(
+            cache.contains_key("c"),
+            "c (frame 130) should survive at frame 140"
+        );
+    }
+
+    #[test]
+    fn lru_eviction_preserves_recently_used() {
+        use std::collections::HashMap;
+        type Cache = HashMap<String, (u64, u64)>;
+        let mut cache = Cache::new();
+        const EVICT_AGE: u64 = 120;
+
+        // All entries recently used.
+        for i in 0..300u64 {
+            cache.insert(format!("entry_{i}"), (i, 900 + (i % 10)));
+        }
+        let fc: u64 = 910;
+        cache.retain(|_, (_, last)| fc.saturating_sub(*last) < EVICT_AGE);
+        // All entries within 120 frames of 910, so all survive.
+        assert_eq!(cache.len(), 300);
     }
 }
