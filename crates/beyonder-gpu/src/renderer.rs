@@ -1322,11 +1322,17 @@ impl Renderer {
 
         // --- Rect layout ---
         let mut rects = if !self.tui_active {
-            let (r, total_h) = self.layout_blocks();
+            // Prime the layout cache so `total_content_height` reflects the
+            // current (possibly growing) block heights BEFORE placing rects.
+            // This lets auto-snap during a running command move the scroll
+            // offset to the new bottom on this frame — not one frame later.
+            self.rebuild_block_layout_cache();
+            let total_h = *self.block_y_prefix.last().unwrap_or(&0.0);
             self.viewport.total_content_height = total_h;
             if self.running_block_idx.is_some() && self.viewport.pinned_to_bottom {
                 self.viewport.scroll_to_bottom();
             }
+            let (r, _) = self.layout_blocks();
             r
         } else {
             let mut r = vec![];
