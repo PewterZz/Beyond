@@ -214,12 +214,19 @@ fn shell_probe(cmd: &str) -> Option<String> {
     } else {
         &["-ilc", cmd]
     };
-    let out = std::process::Command::new(&shell).args(args).output().ok()?;
+    let out = std::process::Command::new(&shell)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 fn current_conda_env() -> String {

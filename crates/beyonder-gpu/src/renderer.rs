@@ -2180,8 +2180,7 @@ impl Renderer {
         if !self.agent_model.is_empty() {
             let model_label = format!("\u{f135}  {}", self.agent_model); // rocket icon
             let model_font = phys_font * 0.75;
-            let (_, model_text_w) =
-                self.make_pill_buffer(&model_label, model_font, measure_color);
+            let (_, model_text_w) = self.make_pill_buffer(&model_label, model_font, measure_color);
             let model_w = model_text_w + 2.0 * pill_hpad;
             let model_x = win_w - model_w - 14.0 * sc;
             rects.push(
@@ -3404,12 +3403,7 @@ impl Renderer {
     /// that way rect and glyphs always agree, regardless of font fallback
     /// (Linux often falls back from JetBrainsMono Nerd Font and glyph widths
     /// don't match the old formula-based estimate).
-    fn make_pill_buffer(
-        &mut self,
-        text: &str,
-        size: f32,
-        color: GlyphColor,
-    ) -> (GlyphBuffer, f32) {
+    fn make_pill_buffer(&mut self, text: &str, size: f32, color: GlyphColor) -> (GlyphBuffer, f32) {
         let metrics = Metrics::new(size, size * 1.4);
         let mut buf = GlyphBuffer::new(&mut self.font_system, metrics);
         buf.set_size(&mut self.font_system, None, None);
@@ -3423,10 +3417,7 @@ impl Renderer {
             Shaping::Advanced,
         );
         buf.shape_until_scroll(&mut self.font_system, false);
-        let measured = buf
-            .layout_runs()
-            .map(|r| r.line_w)
-            .fold(0.0_f32, f32::max);
+        let measured = buf.layout_runs().map(|r| r.line_w).fold(0.0_f32, f32::max);
         (buf, measured)
     }
 
