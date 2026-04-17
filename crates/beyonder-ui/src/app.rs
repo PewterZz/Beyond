@@ -233,6 +233,12 @@ fn fetch_node_versions() -> Vec<String> {
     }
 }
 
+fn next_unused_tab_label(existing: &[String]) -> String {
+    let used: std::collections::HashSet<u32> =
+        existing.iter().filter_map(|s| s.parse().ok()).collect();
+    (1..).find(|n| !used.contains(n)).unwrap().to_string()
+}
+
 fn longest_common_prefix(items: &[&str]) -> String {
     if items.is_empty() {
         return String::new();
@@ -1047,7 +1053,7 @@ impl App {
     /// Open a new tab and switch to it.
     pub fn new_tab(&mut self) {
         let next_idx = self.tabs.len();
-        let title = format!("{}", next_idx + 1);
+        let title = next_unused_tab_label(&self.tab_titles);
         let fresh = self.fresh_tab_state(title.clone());
         // Stash the currently-active tab, swap fresh into App, and append a None slot
         // at the new active index.
