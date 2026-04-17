@@ -1053,8 +1053,7 @@ impl App {
     }
 
     /// Construct a fresh `TabState` — spawns a new PTY sized to the renderer.
-    fn fresh_tab_state(&self, title: String) -> TabState {
-        let cwd = startup_cwd();
+    fn fresh_tab_state_in_cwd(&self, title: String, cwd: PathBuf) -> TabState {
         let session = Session::new(cwd.clone());
         let session_id = session.id.clone();
         let _ = SessionStore::new(&self.store).insert(&session);
@@ -1113,9 +1112,14 @@ impl App {
 
     /// Open a new tab and switch to it.
     pub fn new_tab(&mut self) {
+        self.new_tab_in_cwd(startup_cwd());
+    }
+
+    /// Open a new tab rooted at `cwd` and switch to it.
+    pub fn new_tab_in_cwd(&mut self, cwd: PathBuf) {
         let next_idx = self.tabs.len();
         let title = next_unused_tab_label(&self.tab_titles);
-        let fresh = self.fresh_tab_state(title.clone());
+        let fresh = self.fresh_tab_state_in_cwd(title.clone(), cwd);
         // Stash the currently-active tab, swap fresh into App, and append a None slot
         // at the new active index.
         let displaced = self.exchange_active(fresh);
@@ -2112,6 +2116,12 @@ impl App {
         if super_or_ctrl_tab {
             if let Key::Character(s) = &event.logical_key {
                 match s.as_str() {
+                    // Cmd+Shift+T: new tab rooted at the active tab's cwd.
+                    "T" => {
+                        let cwd = self.block_builder.cwd.clone();
+                        self.new_tab_in_cwd(cwd);
+                        return;
+                    }
                     "t" => {
                         self.new_tab();
                         return;
