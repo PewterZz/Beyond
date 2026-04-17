@@ -79,6 +79,52 @@ install_nvchad() {
     info "NvChad installed. First 'nvim' launch will sync plugins (takes ~30s)."
 }
 
+# Linux: register Beyondtty with the freedesktop launcher (drun, rofi, GNOME
+# Activities, KDE Krunner, etc.) by writing a .desktop entry and icon. Opt out
+# with SKIP_DESKTOP=1.
+install_desktop_entry() {
+    [ "${SKIP_DESKTOP:-0}" = "1" ] && return 0
+
+    local apps_dir icons_dir
+    if [ "$(id -u)" = "0" ] && { [ "$INSTALL_DIR" = "/usr/local/bin" ] || [ "$INSTALL_DIR" = "/usr/bin" ]; }; then
+        apps_dir="/usr/share/applications"
+        icons_dir="/usr/share/icons/hicolor/256x256/apps"
+    else
+        apps_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+        icons_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
+    fi
+    mkdir -p "$apps_dir" "$icons_dir"
+
+    local icon_url="https://raw.githubusercontent.com/${REPO}/v${1}/assets/beyond-256.png"
+    local icon_path="${icons_dir}/beyondtty.png"
+    if download "$icon_url" "$icon_path" 2>/dev/null; then
+        info "Installed icon to ${icon_path}"
+    else
+        # Try main branch as a fallback (older tags may not have the asset).
+        download "https://raw.githubusercontent.com/${REPO}/main/assets/beyond-256.png" "$icon_path" 2>/dev/null \
+            || info "Couldn't fetch icon — .desktop entry will use a generic icon."
+    fi
+
+    local desktop_path="${apps_dir}/beyondtty.desktop"
+    cat > "$desktop_path" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Beyondtty
+GenericName=AI-Native Terminal
+Comment=Block-oriented terminal with first-class AI agents
+Exec=beyondtty
+Icon=beyondtty
+Terminal=false
+Categories=Utility;TerminalEmulator;Development;
+Keywords=terminal;shell;ai;agent;llm;
+StartupWMClass=beyondtty
+EOF
+    info "Installed desktop entry to ${desktop_path}"
+
+    command -v update-desktop-database >/dev/null && update-desktop-database "$apps_dir" 2>/dev/null || true
+    command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t -f "$(dirname "$(dirname "$(dirname "$icons_dir")")")" 2>/dev/null || true
+}
+
 main() {
     local version="${VERSION:-}"
     local platform
@@ -115,6 +161,11 @@ main() {
         fi
         chmod +x "${INSTALL_DIR}/${bin}"
     done
+
+    # Linux: register a .desktop entry so launchers (drun/rofi/GNOME/KDE) find it.
+    case "$platform" in
+        *linux*) install_desktop_entry "$version" ;;
+    esac
 
     # NvChad: installs only when the user opts in (INSTALL_NVCHAD=1) AND
     # no nvim config is present. Never clobbers existing configs.
