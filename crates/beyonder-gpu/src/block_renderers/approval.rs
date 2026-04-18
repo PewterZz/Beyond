@@ -3,7 +3,7 @@
 
 use super::render_block_background;
 use crate::pipeline::RectInstance;
-use beyonder_core::Block;
+use beyonder_core::{Block, BlockContent};
 
 #[allow(clippy::too_many_arguments)]
 pub fn render_approval_block(
@@ -15,6 +15,7 @@ pub fn render_approval_block(
     scale: f32,
     rects: &mut Vec<RectInstance>,
     button_rects: &mut Vec<([f32; 4], String, bool)>,
+    text_labels: &mut Vec<(String, [f32; 4], [u8; 3])>,
 ) {
     render_block_background(block, x, y, width, height, rects);
 
@@ -36,7 +37,11 @@ pub fn render_approval_block(
         .with_radius(2.0 * scale),
     );
 
-    // Approve (Green dark) / Deny (Red dark) buttons
+    let granted = match &block.content {
+        BlockContent::ApprovalRequest { granted, .. } => *granted,
+        _ => None,
+    };
+
     let btn_y = y + height - 32.0 * scale;
     let btn_w = 90.0 * scale;
     let btn_h = 24.0 * scale;
@@ -44,14 +49,53 @@ pub fn render_approval_block(
     let gap = 10.0 * scale;
     let approve_x = x + gap;
     let deny_x = x + gap + btn_w + gap;
-    rects.push(
-        RectInstance::filled(approve_x, btn_y, btn_w, btn_h, [0.210, 0.500, 0.245, 1.0])
-            .with_radius(btn_r),
-    );
-    rects.push(
-        RectInstance::filled(deny_x, btn_y, btn_w, btn_h, [0.530, 0.165, 0.220, 1.0])
-            .with_radius(btn_r),
-    );
-    button_rects.push(([approve_x, btn_y, btn_w, btn_h], block.id.0.clone(), true));
-    button_rects.push(([deny_x, btn_y, btn_w, btn_h], block.id.0.clone(), false));
+
+    match granted {
+        None => {
+            // Pending — draw clickable Approve / Deny buttons with labels.
+            rects.push(
+                RectInstance::filled(approve_x, btn_y, btn_w, btn_h, [0.210, 0.500, 0.245, 1.0])
+                    .with_radius(btn_r),
+            );
+            rects.push(
+                RectInstance::filled(deny_x, btn_y, btn_w, btn_h, [0.530, 0.165, 0.220, 1.0])
+                    .with_radius(btn_r),
+            );
+            button_rects.push(([approve_x, btn_y, btn_w, btn_h], block.id.0.clone(), true));
+            button_rects.push(([deny_x, btn_y, btn_w, btn_h], block.id.0.clone(), false));
+            text_labels.push((
+                "Approve".to_string(),
+                [approve_x, btn_y, btn_w, btn_h],
+                [255, 255, 255],
+            ));
+            text_labels.push((
+                "Deny".to_string(),
+                [deny_x, btn_y, btn_w, btn_h],
+                [255, 255, 255],
+            ));
+        }
+        Some(true) => {
+            // Resolved — single muted "Approved" pill, no click target.
+            rects.push(
+                RectInstance::filled(approve_x, btn_y, btn_w, btn_h, [0.115, 0.260, 0.135, 1.0])
+                    .with_radius(btn_r),
+            );
+            text_labels.push((
+                "✓ Approved".to_string(),
+                [approve_x, btn_y, btn_w, btn_h],
+                [180, 220, 190],
+            ));
+        }
+        Some(false) => {
+            rects.push(
+                RectInstance::filled(approve_x, btn_y, btn_w, btn_h, [0.270, 0.080, 0.110, 1.0])
+                    .with_radius(btn_r),
+            );
+            text_labels.push((
+                "✗ Denied".to_string(),
+                [approve_x, btn_y, btn_w, btn_h],
+                [220, 180, 185],
+            ));
+        }
+    }
 }

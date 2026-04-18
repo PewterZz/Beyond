@@ -186,6 +186,9 @@ pub struct Renderer {
     /// Approval block button rects: ([x,y,w,h], block_id, is_approve).
     /// Rebuilt each frame while approval blocks are visible.
     pub approval_button_rects: Vec<([f32; 4], String, bool)>,
+    /// Approval block button/status labels: (text, [x,y,w,h], rgb).
+    /// Populated in `layout_blocks`, consumed in `build_text_buffers`.
+    approval_labels: Vec<(String, [f32; 4], [u8; 3])>,
     /// Bounding rects [x, y, w, h] per dropdown item (written during layout).
     pub dropdown_item_rects: Vec<[f32; 4]>,
 
@@ -495,6 +498,7 @@ impl Renderer {
             pill_rects: vec![],
             link_rects: vec![],
             approval_button_rects: vec![],
+            approval_labels: vec![],
             dropdown_item_rects: vec![],
             command_palette: None,
             cmd_palette_hovered: None,
@@ -1842,8 +1846,10 @@ impl Renderer {
         self.rebuild_block_layout_cache();
         self.link_rects.clear();
         self.approval_button_rects.clear();
+        self.approval_labels.clear();
         let mut link_rects_local: Vec<([f32; 4], String)> = vec![];
         let mut approval_btns_local: Vec<([f32; 4], String, bool)> = vec![];
+        let mut approval_labels_local: Vec<(String, [f32; 4], [u8; 3])> = vec![];
         let mut rects = vec![];
         let sc = self.scale_factor;
         let padding = PADDING * sc;
@@ -1883,6 +1889,7 @@ impl Renderer {
                             sc,
                             &mut rects,
                             &mut approval_btns_local,
+                            &mut approval_labels_local,
                         );
                     }
                     _ => {
@@ -2118,6 +2125,7 @@ impl Renderer {
         let total_h = *self.block_y_prefix.last().unwrap_or(&0.0);
         self.link_rects.extend(link_rects_local);
         self.approval_button_rects.extend(approval_btns_local);
+        self.approval_labels.extend(approval_labels_local);
         (rects, total_h)
     }
 
@@ -3001,6 +3009,20 @@ impl Renderer {
         }
 
         self.blocks = blocks;
+
+        // Approval block button/status labels — centered in their rects.
+        let phys_font = self.font_size * self.scale_factor;
+        let label_font = phys_font * 0.85;
+        let label_h = label_font * 1.4;
+        let labels = std::mem::take(&mut self.approval_labels);
+        for (text, rect, rgb) in &labels {
+            let color = GlyphColor::rgb(rgb[0], rgb[1], rgb[2]);
+            let (buf, w) = self.make_pill_buffer(text, label_font, color);
+            let [rx, ry, rw, rh] = *rect;
+            let tx = rx + (rw - w) * 0.5;
+            let ty = ry + (rh - label_h) * 0.5;
+            results.push((buf, tx, ty, w.max(1.0), label_h, color));
+        }
 
         // Block entries end here. Bar text is appended separately via build_bar_text_buffers.
         let block_entry_count = results.len();
