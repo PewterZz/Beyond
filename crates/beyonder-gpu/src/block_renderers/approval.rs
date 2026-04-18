@@ -15,16 +15,15 @@ pub fn render_approval_block(
     scale: f32,
     rects: &mut Vec<RectInstance>,
     button_rects: &mut Vec<([f32; 4], String, bool)>,
+    text_labels: &mut Vec<(String, [f32; 4], [u8; 3])>,
 ) {
     render_block_background(block, x, y, width, height, rects);
 
-    // Yellow #f9e2af stripe — attention signal
     rects.push(
         RectInstance::filled(x, y, 4.0 * scale, height, [0.976, 0.886, 0.686, 1.0])
             .with_radius(scale * 2.0),
     );
 
-    // Header bar — dark Yellow tint
     rects.push(
         RectInstance::filled(
             x + scale,
@@ -36,7 +35,6 @@ pub fn render_approval_block(
         .with_radius(2.0 * scale),
     );
 
-    // Approve (Green dark) / Deny (Red dark) buttons
     let btn_y = y + height - 32.0 * scale;
     let btn_w = 90.0 * scale;
     let btn_h = 24.0 * scale;
@@ -44,6 +42,7 @@ pub fn render_approval_block(
     let gap = 10.0 * scale;
     let approve_x = x + gap;
     let deny_x = x + gap + btn_w + gap;
+
     rects.push(
         RectInstance::filled(approve_x, btn_y, btn_w, btn_h, [0.210, 0.500, 0.245, 1.0])
             .with_radius(btn_r),
@@ -54,4 +53,14 @@ pub fn render_approval_block(
     );
     button_rects.push(([approve_x, btn_y, btn_w, btn_h], block.id.0.clone(), true));
     button_rects.push(([deny_x, btn_y, btn_w, btn_h], block.id.0.clone(), false));
+    text_labels.push((
+        "Approve".to_string(),
+        [approve_x, btn_y, btn_w, btn_h],
+        [255, 255, 255],
+    ));
+    text_labels.push((
+        "Deny".to_string(),
+        [deny_x, btn_y, btn_w, btn_h],
+        [255, 255, 255],
+    ));
 }

@@ -1053,8 +1053,7 @@ impl App {
     }
 
     /// Construct a fresh `TabState` — spawns a new PTY sized to the renderer.
-    fn fresh_tab_state(&self, title: String) -> TabState {
-        let cwd = startup_cwd();
+    fn fresh_tab_state_in_cwd(&self, title: String, cwd: PathBuf) -> TabState {
         let session = Session::new(cwd.clone());
         let session_id = session.id.clone();
         let _ = SessionStore::new(&self.store).insert(&session);
@@ -1113,9 +1112,14 @@ impl App {
 
     /// Open a new tab and switch to it.
     pub fn new_tab(&mut self) {
+        self.new_tab_in_cwd(startup_cwd());
+    }
+
+    /// Open a new tab rooted at `cwd` and switch to it.
+    pub fn new_tab_in_cwd(&mut self, cwd: PathBuf) {
         let next_idx = self.tabs.len();
         let title = next_unused_tab_label(&self.tab_titles);
-        let fresh = self.fresh_tab_state(title.clone());
+        let fresh = self.fresh_tab_state_in_cwd(title.clone(), cwd);
         // Stash the currently-active tab, swap fresh into App, and append a None slot
         // at the new active index.
         let displaced = self.exchange_active(fresh);
@@ -1874,22 +1878,23 @@ impl App {
             .await
             .resolve_approval(block_id, decision);
 
-        if let Some(block) = self.blocks.iter_mut().find(|b| b.id.0 == block_id) {
-            if let BlockContent::ApprovalRequest {
-                granted: g,
-                granter,
-                ..
-            } = &mut block.content
-            {
-                *g = Some(granted);
-                *granter = Some(beyonder_core::ActorId::Human);
+        // Remove the approval block from the stream — visual confirmation isn't
+        // needed (the next agent action speaks for itself; on deny the agent stops).
+        let agent_id = self
+            .blocks
+            .iter()
+            .find(|b| b.id.0 == block_id)
+            .and_then(|b| b.agent_id.clone());
+        self.blocks.retain(|b| b.id.0 != block_id);
+        self.blocks_dirty = true;
+
+        if !granted {
+            if let Some(id) = agent_id {
+                if let Err(e) = self.supervisor.kill_agent(&id).await {
+                    error!("kill_agent on deny failed: {e}");
+                }
+                self.agent_running_tool.remove(&id);
             }
-            block.status = if granted {
-                BlockStatus::Completed
-            } else {
-                BlockStatus::Failed
-            };
-            self.blocks_dirty = true;
         }
     }
 
@@ -2112,6 +2117,12 @@ impl App {
         if super_or_ctrl_tab {
             if let Key::Character(s) = &event.logical_key {
                 match s.as_str() {
+                    // Cmd+Shift+T: new tab rooted at the active tab's cwd.
+                    "T" => {
+                        let cwd = self.block_builder.cwd.clone();
+                        self.new_tab_in_cwd(cwd);
+                        return;
+                    }
                     "t" => {
                         self.new_tab();
                         return;
