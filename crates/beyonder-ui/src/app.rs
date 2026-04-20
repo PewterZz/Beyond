@@ -658,6 +658,18 @@ pub struct App {
     /// Only re-run them if this much time has elapsed since the last probe.
     last_env_probe: std::time::Instant,
 
+    // ── Shell-command hang watchdog ───────────────────────────────────────────
+    /// Last observed output length for the currently-running command and the
+    /// wall-clock when it was last seen to grow. Together with
+    /// `BlockBuilder::hang_diag()` these let tick() log a WARN when a command
+    /// has been running with no new output for too long — the user-visible
+    /// symptom of a missed OSC CmdEnd marker or a shell stuck in an rc hook.
+    hang_last_output_len: Option<usize>,
+    hang_last_output_change_at: Option<std::time::Instant>,
+    /// Set when we've already logged a hang warning for the current command,
+    /// so we don't spam WARN every tick for the same stall.
+    hang_warned: bool,
+
     // ── Tabs ──────────────────────────────────────────────────────────────────
     /// Stashed per-tab state. `None` at `active_tab` (its fields live on App).
     pub tabs: Vec<Option<TabState>>,
@@ -955,6 +967,9 @@ impl App {
             blocks_dirty: false,
             // Use a past instant so the first post-command probe runs after startup.
             last_env_probe: std::time::Instant::now() - std::time::Duration::from_secs(60),
+            hang_last_output_len: None,
+            hang_last_output_change_at: None,
+            hang_warned: false,
             tabs: vec![None],
             active_tab: 0,
             tab_titles: vec!["1".to_string()],
@@ -3335,6 +3350,7 @@ impl App {
     /// Drain all async event sources. Returns `true` if any work was done that
     /// requires a redraw (PTY output, agent events, config reload, remote msgs).
     pub async fn tick(&mut self) -> bool {
+        let tick_start = std::time::Instant::now();
         let mut had_work = false;
 
         // Config hot-reload: drain all pending file-watcher events (notify fires
@@ -3359,6 +3375,14 @@ impl App {
         let mut pty_output: Vec<Vec<u8>> = vec![];
         let mut pty_exited: Option<Option<u32>> = None;
         let mut pty_drain_capped = false;
+        // Snapshot the reader thread's last-send stamp *before* draining. If
+        // the event-loop woke promptly after the wake callback this will be
+        // ~0ms; a large value means the winit `EventLoopProxy::send_event(())`
+        // wake was delayed or coalesced and tick() only ran on the fallback
+        // timer. That scenario is the most likely explanation for fast
+        // commands (`ls`, `cd`) appearing hung — the output sat in the
+        // channel while the loop slept. See main.rs:175 comment.
+        let pre_drain_wake_age_ms = self.pty.as_ref().and_then(|p| p.last_output_send_age_ms());
         if let Some(pty) = &mut self.pty {
             let mut bytes_drained = 0usize;
             while let Ok(event) = pty.event_rx.try_recv() {
@@ -3382,6 +3406,21 @@ impl App {
         let had_pty_output = !pty_output.is_empty();
         if had_pty_output {
             had_work = true;
+            // Wake-lag probe: reader already pushed output but tick() only
+            // reached it now. 100ms is well above any healthy wake path (event
+            // proxy round-trip on macOS is <5ms) but below the 500ms idle
+            // fallback, so >=100ms almost always means "EventLoopProxy wake
+            // missed or got coalesced" — the smoking gun for ls/cd hangs.
+            if let Some(age_ms) = pre_drain_wake_age_ms {
+                if age_ms >= 100 {
+                    tracing::warn!(
+                        wake_lag_ms = age_ms,
+                        "PTY output reached tick() >=100ms after reader wake — EventLoopProxy::send_event likely delayed or coalesced; tick ran on fallback timer"
+                    );
+                } else if age_ms >= 32 {
+                    tracing::debug!(wake_lag_ms = age_ms, "PTY wake-to-drain lag elevated");
+                }
+            }
         }
         // Collect OSC 52 read-query responses before the mutable feed loop.
         let osc52_responses: Vec<String> = pty_output
@@ -3702,6 +3741,52 @@ impl App {
                     &text[..text.len().min(80)]
                 );
             }
+        }
+
+        // Shell-command hang watchdog. Always-on at WARN level — the single
+        // most useful signal when a user reports "ls hangs": tells us exactly
+        // which command is stalled, how long since output stopped growing, and
+        // how much output we have so far. Missed CmdEnd markers, slow rc
+        // hooks, and split OSC sequences all manifest here.
+        if let Some(diag) = self.block_builder.hang_diag() {
+            let now = std::time::Instant::now();
+            if self.hang_last_output_len != Some(diag.output_len) {
+                self.hang_last_output_len = Some(diag.output_len);
+                self.hang_last_output_change_at = Some(now);
+                self.hang_warned = false;
+            }
+            let elapsed = diag.started_at.elapsed();
+            let stale = self
+                .hang_last_output_change_at
+                .map(|t| t.elapsed())
+                .unwrap_or_default();
+            if !self.hang_warned
+                && elapsed >= std::time::Duration::from_secs(3)
+                && stale >= std::time::Duration::from_secs(1)
+            {
+                tracing::warn!(
+                    command = %diag.command,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    stale_ms = stale.as_millis() as u64,
+                    output_bytes = diag.output_len,
+                    "Shell command appears hung — no new output for >=1s after running >=3s (missed CmdEnd marker, slow rc hook, or split OSC sequence)"
+                );
+                self.hang_warned = true;
+            }
+        } else {
+            self.hang_last_output_len = None;
+            self.hang_last_output_change_at = None;
+            self.hang_warned = false;
+        }
+
+        // tick() profiling — logs slow ticks so we can see when the UI thread
+        // is spending too long in drain/feed/agent-event handling. 50ms is the
+        // perceptual threshold above which ls/cd would feel sluggish.
+        let tick_ms = tick_start.elapsed().as_millis() as u64;
+        if tick_ms >= 50 {
+            tracing::warn!(tick_ms, had_work, "slow App::tick");
+        } else if tick_ms >= 16 {
+            tracing::debug!(tick_ms, had_work, "App::tick over one frame");
         }
 
         // If we bailed out of the PTY drain early, force another wake so the
@@ -4049,6 +4134,7 @@ impl App {
     }
 
     pub fn render(&mut self) -> Result<()> {
+        let render_start = std::time::Instant::now();
         // Sync blocks to the renderer once per frame when dirty, instead of
         // cloning the full vec on every individual mutation.
         if self.blocks_dirty {
@@ -4174,6 +4260,13 @@ impl App {
                 winit::dpi::LogicalPosition::new(lx, ly),
                 winit::dpi::LogicalSize::new(lw.max(1.0), lh.max(1.0)),
             );
+        }
+
+        let render_ms = render_start.elapsed().as_millis() as u64;
+        if render_ms >= 33 {
+            tracing::warn!(render_ms, "slow App::render (>2 frames)");
+        } else if render_ms >= 16 {
+            tracing::debug!(render_ms, "App::render over one frame");
         }
 
         result

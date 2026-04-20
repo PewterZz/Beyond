@@ -25,6 +25,7 @@ license = "GPL-3.0-or-later"
 keywords = ["terminal", "ai", "gpu", "wgpu", "agent"]
 categories = ["command-line-utilities", "graphics"]
 exclude = ["assets/", "Formula/", "run*.log", ".claude/"]
+default-run = "beyonder"
 
 [[bin]]
 name = "beyondtty"

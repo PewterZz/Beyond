@@ -51,11 +51,20 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar czf ../../../beyondtty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz beyondtty beyonder
 
+      - name: Bundle Beyondtty.app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BIN="target/${{ matrix.target }}/release/beyondtty" \
+            bash scripts/bundle-macos-app.sh
+          tar czf beyondtty-${{ github.ref_name }}-${{ matrix.target }}.app.tar.gz Beyondtty.app
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: beyondtty-${{ matrix.target }}
-          path: beyondtty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+          path: |
+            beyondtty-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            beyondtty-${{ github.ref_name }}-${{ matrix.target }}.app.tar.gz
 
   release:
     needs: build
