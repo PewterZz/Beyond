@@ -3,3 +3,6 @@
 .claude/scheduled_tasks.lock
 *.swp
 .DS_Store
+/Beyondtty.app
+run.log
+run*.log
