@@ -19,8 +19,17 @@ pub enum BuildEvent {
 }
 use std::path::PathBuf;
 use std::time::Instant;
+use tracing::{debug, warn};
 
 use crate::shell_hooks::markers;
+
+/// Snapshot of a running command, used by the UI hang watchdog.
+#[derive(Debug, Clone)]
+pub struct HangDiag {
+    pub command: String,
+    pub started_at: Instant,
+    pub output_len: usize,
+}
 
 /// State machine tracking where we are in a command lifecycle.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +53,11 @@ pub struct BlockBuilder {
     /// PTY dimensions — used to size the temp TermGrid for color-preserving output parsing.
     grid_cols: usize,
     grid_rows: usize,
+    /// Wall-clock at construction — used to log shell-spawn → first-prompt latency.
+    created_at: Instant,
+    /// Whether we've logged the first PromptStart after spawn. Gates the info-level
+    /// "shell integration ready" message so it fires exactly once per session.
+    logged_first_prompt: bool,
 }
 
 impl BlockBuilder {
@@ -55,6 +69,8 @@ impl BlockBuilder {
             pending_block_id: None,
             grid_cols: 220,
             grid_rows: 50,
+            created_at: Instant::now(),
+            logged_first_prompt: false,
         }
     }
 
@@ -71,6 +87,14 @@ impl BlockBuilder {
                 if let Some((marker, consumed)) = parse_osc_133(&bytes[i..]) {
                     match marker {
                         Osc133Marker::PromptStart => {
+                            if !self.logged_first_prompt {
+                                self.logged_first_prompt = true;
+                                tracing::info!(
+                                    spawn_to_prompt_ms = self.created_at.elapsed().as_millis() as u64,
+                                    "First shell prompt seen — shell integration ready (133;A)"
+                                );
+                            }
+                            debug!(source = "osc133", "PromptStart");
                             self.state = BuildState::AtPrompt;
                         }
                         Osc133Marker::CmdExecStart => {
@@ -78,6 +102,7 @@ impl BlockBuilder {
                             // If 633;E hasn't already kicked us into RunningCommand,
                             // start with an unknown command string.
                             if matches!(self.state, BuildState::AtPrompt) {
+                                debug!(source = "osc133", "CmdExecStart (no prior cmd text)");
                                 let id = BlockId::new();
                                 self.pending_block_id = Some(id.clone());
                                 let mut block = Block::new(
@@ -109,6 +134,14 @@ impl BlockBuilder {
                             } = std::mem::replace(&mut self.state, BuildState::AtPrompt)
                             {
                                 let duration_ms = started_at.elapsed().as_millis() as u64;
+                                debug!(
+                                    source = "osc133",
+                                    exit_code = code,
+                                    duration_ms,
+                                    output_bytes = output_bytes.len(),
+                                    command = %command,
+                                    "CmdEnd"
+                                );
                                 let output = parse_ansi_output(
                                     &output_bytes,
                                     self.grid_cols,
@@ -133,6 +166,20 @@ impl BlockBuilder {
                     }
                     i += consumed;
                     continue;
+                } else {
+                    // Parse failed. If the terminator is missing *in this read*,
+                    // the marker was split across reads and will be mis-accumulated
+                    // as output — state machine will not advance. This is the
+                    // prime suspect for "command appears to hang forever" bugs.
+                    let tail = &bytes[i + 6..];
+                    if !tail.iter().any(|&b| b == markers::BEL || b == b'\x1b') {
+                        warn!(
+                            osc = 133,
+                            tail_bytes = tail.len(),
+                            tail_preview = %String::from_utf8_lossy(&tail[..tail.len().min(32)]),
+                            "OSC 133 sequence missing terminator in this PTY read — likely split across reads; state machine will not advance and command will appear hung"
+                        );
+                    }
                 }
             }
 
@@ -140,8 +187,11 @@ impl BlockBuilder {
             if bytes[i..].starts_with(b"\x1b]633;") {
                 if let Some((marker, consumed, _payload)) = parse_osc_633(&bytes[i..]) {
                     match marker {
-                        OscMarker::CmdStart => {}
+                        OscMarker::CmdStart => {
+                            debug!(source = "osc633", "CmdStart");
+                        }
                         OscMarker::CmdText(cmd) => {
+                            debug!(source = "osc633", command = %cmd, "CmdText → RunningCommand");
                             let id = BlockId::new();
                             self.pending_block_id = Some(id.clone());
                             // Emit a Running block immediately so the UI shows feedback.
@@ -173,6 +223,14 @@ impl BlockBuilder {
                             } = std::mem::replace(&mut self.state, BuildState::AtPrompt)
                             {
                                 let duration_ms = started_at.elapsed().as_millis() as u64;
+                                debug!(
+                                    source = "osc633",
+                                    exit_code,
+                                    duration_ms,
+                                    output_bytes = output_bytes.len(),
+                                    command = %command,
+                                    "CmdEnd"
+                                );
                                 let output = parse_ansi_output(
                                     &output_bytes,
                                     self.grid_cols,
@@ -195,14 +253,34 @@ impl BlockBuilder {
                             }
                         }
                         OscMarker::PromptStart => {
+                            if !self.logged_first_prompt {
+                                self.logged_first_prompt = true;
+                                tracing::info!(
+                                    spawn_to_prompt_ms = self.created_at.elapsed().as_millis() as u64,
+                                    "First shell prompt seen — shell integration ready (633;A)"
+                                );
+                            }
+                            debug!(source = "osc633", "PromptStart");
                             self.state = BuildState::AtPrompt;
                         }
                         OscMarker::Cwd(path) => {
+                            debug!(source = "osc633", cwd = %path, "Cwd");
                             self.cwd = PathBuf::from(path);
                         }
                     }
                     i += consumed;
                     continue;
+                } else {
+                    // Same split-marker canary as OSC 133 above.
+                    let tail = &bytes[i + 6..];
+                    if !tail.iter().any(|&b| b == markers::BEL || b == b'\x1b') {
+                        warn!(
+                            osc = 633,
+                            tail_bytes = tail.len(),
+                            tail_preview = %String::from_utf8_lossy(&tail[..tail.len().min(32)]),
+                            "OSC 633 sequence missing terminator in this PTY read — likely split across reads; state machine will not advance and command will appear hung"
+                        );
+                    }
                 }
             }
 
@@ -237,6 +315,25 @@ impl BlockBuilder {
     pub fn running_command_name(&self) -> Option<&str> {
         if let BuildState::RunningCommand { command, .. } = &self.state {
             command.split_whitespace().next()
+        } else {
+            None
+        }
+    }
+
+    /// Snapshot of the currently running command — used by the UI watchdog
+    /// to detect stalled commands (no output growth after N seconds).
+    pub fn hang_diag(&self) -> Option<HangDiag> {
+        if let BuildState::RunningCommand {
+            command,
+            output_bytes,
+            started_at,
+        } = &self.state
+        {
+            Some(HangDiag {
+                command: command.clone(),
+                started_at: *started_at,
+                output_len: output_bytes.len(),
+            })
         } else {
             None
         }

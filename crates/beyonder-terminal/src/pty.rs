@@ -4,9 +4,22 @@ use anyhow::{Context, Result};
 use beyonder_core::SessionId;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{debug, info, trace, warn};
+
+/// Monotonic clock anchor shared across PTY sessions so `last_send_ns` stays
+/// comparable against `App::tick` timestamps.
+fn monotonic_start() -> &'static std::time::Instant {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now)
+}
+
+/// Elapsed nanoseconds since `monotonic_start`, bounded to `u64` for `AtomicU64`.
+fn now_ns() -> u64 {
+    monotonic_start().elapsed().as_nanos() as u64
+}
 
 /// Events from a PTY session.
 #[derive(Debug, Clone)]
@@ -29,6 +42,12 @@ pub struct PtySession {
     #[allow(dead_code)]
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     pub event_rx: mpsc::Receiver<PtyEvent>,
+    /// Set to `now_ns()` by the reader thread right after it sends a PtyEvent
+    /// and calls `wake()`. `App::tick()` diffs against this to measure the lag
+    /// between "reader pushed output" and "event-loop got around to draining
+    /// it" — the gap that `ControlFlow::WaitUntil` + a dropped/stalled
+    /// `EventLoopProxy::send_event` wake would show up as. 0 means "never sent".
+    last_send_ns: Arc<AtomicU64>,
 }
 
 impl PtySession {
@@ -189,6 +208,10 @@ impl PtySession {
 
         let (event_tx, event_rx) = mpsc::channel(1024);
 
+        // Prime the monotonic clock before the reader thread uses it.
+        let _ = monotonic_start();
+        let last_send_ns = Arc::new(AtomicU64::new(0));
+
         // Spawn a background reader thread (blocking I/O — can't use tokio directly here).
         let mut reader = pair
             .master
@@ -196,25 +219,81 @@ impl PtySession {
             .context("Failed to clone PTY reader")?;
         let child_clone = Arc::clone(&child);
         let tx = event_tx.clone();
+        let session_tag = session_id.0.clone();
+        let last_send_ns_writer = Arc::clone(&last_send_ns);
         std::thread::spawn(move || {
             // 64KB read buffer — 16x the old 4KB to reduce syscall overhead
             // for bulk output (e.g. `cat large_file`). The OS will fill as
             // much as available per read, so larger buffer = fewer events.
             const BUF_SIZE: usize = 65536;
             let mut buf = vec![0u8; BUF_SIZE];
+            let mut total_reads: u64 = 0;
+            let mut total_bytes: u64 = 0;
+            let mut last_read_at = std::time::Instant::now();
             loop {
+                let read_start = std::time::Instant::now();
                 match std::io::Read::read(&mut reader, &mut buf) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        debug!(session = %session_tag, "PTY reader: read returned 0 — EOF");
+                        break;
+                    }
                     Ok(n) => {
+                        let gap_ms = read_start.duration_since(last_read_at).as_millis() as u64;
+                        last_read_at = read_start;
+                        total_reads += 1;
+                        total_bytes += n as u64;
+                        trace!(
+                            session = %session_tag,
+                            bytes = n,
+                            gap_ms,
+                            total_reads,
+                            total_bytes,
+                            "PTY read"
+                        );
                         // Send exactly the bytes read — no over-allocation.
-                        let _ = tx.blocking_send(PtyEvent::Output(buf[..n].to_vec()));
+                        // Measure `blocking_send` latency — it only blocks if the
+                        // bounded channel (capacity 1024) is full, which would
+                        // mean the UI tick is not draining fast enough. Any
+                        // latency above a few ms here is a real backpressure
+                        // signal worth surfacing.
+                        let send_start = std::time::Instant::now();
+                        let send_res = tx.blocking_send(PtyEvent::Output(buf[..n].to_vec()));
+                        let send_ms = send_start.elapsed().as_millis() as u64;
+                        if send_res.is_err() {
+                            debug!(session = %session_tag, "PTY reader: event channel closed");
+                            break;
+                        }
+                        if send_ms >= 50 {
+                            warn!(
+                                session = %session_tag,
+                                send_ms,
+                                bytes = n,
+                                "PTY reader blocked >50ms sending to UI (channel saturated — UI tick is not draining in time)"
+                            );
+                        } else if send_ms >= 5 {
+                            debug!(session = %session_tag, send_ms, bytes = n, "PTY reader blocking_send slow");
+                        }
                         if let Some(ref w) = wake {
                             w();
                         }
+                        // Stamp *after* the wake so the age measured in tick()
+                        // covers "reader finished signalling" → "event loop
+                        // began draining". A missed/delayed EventLoopProxy
+                        // wake shows up as a large age despite fast send.
+                        last_send_ns_writer.store(now_ns(), Ordering::Release);
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        debug!(session = %session_tag, error = %e, "PTY reader: read error — exiting loop");
+                        break;
+                    }
                 }
             }
+            info!(
+                session = %session_tag,
+                total_reads,
+                total_bytes,
+                "PTY reader thread exiting"
+            );
             // Child exited — get exit code.
             let code = child_clone
                 .lock()
@@ -233,7 +312,24 @@ impl PtySession {
             writer,
             child,
             event_rx,
+            last_send_ns,
         })
+    }
+
+    /// Milliseconds since the reader thread last pushed a PtyEvent + fired the
+    /// wake callback. `None` means no output has arrived yet. Compare this at
+    /// the start of the event-loop tick to detect wake-lag: if there are
+    /// queued events but the reader stamped `age_ms` back, the event loop slept
+    /// through the wake. Direct probe for the case where sub-second commands
+    /// (`ls`, `cd`) appear hung because tick() only ran on the 500ms fallback
+    /// timer instead of the PTY-driven wake.
+    pub fn last_output_send_age_ms(&self) -> Option<u64> {
+        let stamp = self.last_send_ns.load(Ordering::Acquire);
+        if stamp == 0 {
+            return None;
+        }
+        let now = now_ns();
+        Some(now.saturating_sub(stamp) / 1_000_000)
     }
 
     /// Write bytes to the PTY (user keystrokes or command input).
