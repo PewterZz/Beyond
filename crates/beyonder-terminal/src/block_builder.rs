@@ -90,7 +90,8 @@ impl BlockBuilder {
                             if !self.logged_first_prompt {
                                 self.logged_first_prompt = true;
                                 tracing::info!(
-                                    spawn_to_prompt_ms = self.created_at.elapsed().as_millis() as u64,
+                                    spawn_to_prompt_ms =
+                                        self.created_at.elapsed().as_millis() as u64,
                                     "First shell prompt seen — shell integration ready (133;A)"
                                 );
                             }
@@ -256,7 +257,8 @@ impl BlockBuilder {
                             if !self.logged_first_prompt {
                                 self.logged_first_prompt = true;
                                 tracing::info!(
-                                    spawn_to_prompt_ms = self.created_at.elapsed().as_millis() as u64,
+                                    spawn_to_prompt_ms =
+                                        self.created_at.elapsed().as_millis() as u64,
                                     "First shell prompt seen — shell integration ready (633;A)"
                                 );
                             }
