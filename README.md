@@ -1,6 +1,6 @@
 # Beyond
 
-An AI-native terminal written in Rust. Beyond replaces the traditional scroll buffer with a **block-oriented** model — every piece of content (shell output, agent messages, approvals, diffs, tool calls) is a persistent, addressable `Block` with provenance. Agents are first-class, long-lived processes with capability sets and resource limits, supervised like OS processes. Rendering is GPU-accelerated (`wgpu` + `glyphon`) inside a single `winit` window.
+An AI-native terminal written in Rust. Beyond replaces the traditional scroll buffer with a **block-oriented** model (Warp-like) — every piece of content (shell output, agent messages, approvals, diffs, tool calls) is a persistent, addressable `Block` with provenance. Agents are first-class, long-lived processes with capability sets and resource limits, supervised like OS processes. Rendering is GPU-accelerated (`wgpu` + `glyphon`) inside a single `winit` window.
 
 > Status: early. Phase 2 (glyphon 0.8 text, wgpu 24, continuous render loop) has landed. Expect breaking changes.
 
