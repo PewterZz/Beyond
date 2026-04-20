@@ -3,7 +3,8 @@
 //! CLI dialect to generate (BSD vs GNU, pbcopy vs xclip, etc.).
 
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{mpsc, OnceLock};
+use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct EnvProbe {
@@ -142,6 +143,26 @@ fn have(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Run `have()` for every listed command in parallel via `thread::scope`.
+/// Sequential probing was ~10ms/spawn × ~45 tools = 400ms+ on macOS, which
+/// blocked the agent task that called `build_system_prompt`. Each probe is
+/// an independent fork+exec so fanning them across OS threads is close to
+/// a linear speedup until the process-creation limit — in practice the
+/// whole set lands in 20–60ms.
+fn have_many(cmds: &[&'static str]) -> std::collections::HashMap<&'static str, bool> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        for &cmd in cmds {
+            let tx = tx.clone();
+            scope.spawn(move || {
+                let _ = tx.send((cmd, have(cmd)));
+            });
+        }
+    });
+    drop(tx);
+    rx.into_iter().collect()
+}
+
 fn detect_os_name() -> String {
     #[cfg(target_os = "macos")]
     {
@@ -184,75 +205,176 @@ fn detect_shell() -> String {
 }
 
 /// Probe once; subsequent calls are free. Called by `build_system_prompt`.
+///
+/// Kick this off early (e.g. at app startup via a background thread) so the
+/// first agent spawn doesn't pay the ~tens-of-ms probe cost on its critical
+/// path. The internal OnceLock guarantees the underlying work runs exactly
+/// once per process.
 pub fn probe_environment() -> EnvProbe {
     static CACHE: OnceLock<EnvProbe> = OnceLock::new();
-    CACHE
-        .get_or_init(|| EnvProbe {
-            os_name: detect_os_name(),
-            os_family: std::env::consts::FAMILY.to_string().replace(
-                "unix",
-                match std::env::consts::OS {
-                    "macos" => "macos",
-                    "linux" => "linux",
-                    other => other,
-                },
-            ),
-            arch: std::env::consts::ARCH.to_string(),
-            shell: detect_shell(),
-            has_rg: have("rg"),
-            has_fd: have("fd") || have("fdfind"),
-            has_jq: have("jq"),
-            has_git: have("git"),
-            has_gh: have("gh"),
-            has_python: have("python3") || have("python"),
-            has_node: have("node"),
-            has_cargo: have("cargo"),
-            has_gsed: have("gsed"),
-            has_curl: have("curl"),
-            has_wget: have("wget"),
-            has_dig: have("dig"),
-            has_nslookup: have("nslookup"),
-            has_netcat: have("nc") || have("ncat"),
-            has_nmap: have("nmap"),
-            has_ss: have("ss"),
-            has_netstat: have("netstat"),
-            has_lsof: have("lsof"),
-            has_tcpdump: have("tcpdump"),
-            has_tshark: have("tshark") || have("wireshark"),
-            has_mtr: have("mtr"),
-            has_traceroute: have("traceroute") || have("tracert"),
-            has_htop: have("htop"),
-            has_btop: have("btop") || have("btm"),
-            has_iostat: have("iostat"),
-            has_dtrace: have("dtrace"),
-            has_strace: have("strace"),
-            has_journalctl: have("journalctl"),
-            has_systemctl: have("systemctl"),
-            has_launchctl: have("launchctl"),
-            has_nvidia_smi: have("nvidia-smi"),
-            has_rocm_smi: have("rocm-smi"),
-            has_openssl: have("openssl"),
-            has_gpg: have("gpg") || have("gpg2"),
-            has_ssh: have("ssh"),
-            has_keychain_cli: have("security"),
-            has_secret_tool: have("secret-tool"),
-            has_httpie: have("http") || have("httpie"),
-            has_curl_impersonate: have("curl_chrome110")
-                || have("curl_chrome116")
-                || have("curl_chrome120")
-                || have("curl-impersonate")
-                || have("curl-impersonate-chrome"),
-            has_aria2: have("aria2c"),
-            has_yt_dlp: have("yt-dlp") || have("youtube-dl"),
-            has_pandoc: have("pandoc"),
-            has_lynx: have("lynx"),
-            has_w3m: have("w3m"),
-            has_chromium: have("chromium") || have("google-chrome") || have("chrome"),
-            has_playwright: have("playwright"),
-            has_puppeteer: have("puppeteer"),
-            has_readability: have("readability") || have("readable"),
-            has_trafilatura: have("trafilatura"),
-            internet: probe_internet(),
-        })
-        .clone()
+    CACHE.get_or_init(probe_environment_uncached).clone()
+}
+
+fn probe_environment_uncached() -> EnvProbe {
+    let t0 = Instant::now();
+
+    // Fan subprocess probes + the internet check across threads. The internet
+    // probe is the slowest single item (up to ~3×1200ms when offline) so we
+    // run it in parallel with all the `have()` calls instead of serialising.
+    let net_handle = std::thread::spawn(probe_internet);
+
+    // Every command we might query — listed once so we dispatch a single
+    // batch of parallel probes instead of chains of `have() || have()`.
+    const COMMANDS: &[&str] = &[
+        "rg",
+        "fd",
+        "fdfind",
+        "jq",
+        "git",
+        "gh",
+        "python3",
+        "python",
+        "node",
+        "cargo",
+        "gsed",
+        "curl",
+        "wget",
+        "dig",
+        "nslookup",
+        "nc",
+        "ncat",
+        "nmap",
+        "ss",
+        "netstat",
+        "lsof",
+        "tcpdump",
+        "tshark",
+        "wireshark",
+        "mtr",
+        "traceroute",
+        "tracert",
+        "htop",
+        "btop",
+        "btm",
+        "iostat",
+        "dtrace",
+        "strace",
+        "journalctl",
+        "systemctl",
+        "launchctl",
+        "nvidia-smi",
+        "rocm-smi",
+        "openssl",
+        "gpg",
+        "gpg2",
+        "ssh",
+        "security",
+        "secret-tool",
+        "http",
+        "httpie",
+        "curl_chrome110",
+        "curl_chrome116",
+        "curl_chrome120",
+        "curl-impersonate",
+        "curl-impersonate-chrome",
+        "aria2c",
+        "yt-dlp",
+        "youtube-dl",
+        "pandoc",
+        "lynx",
+        "w3m",
+        "chromium",
+        "google-chrome",
+        "chrome",
+        "playwright",
+        "puppeteer",
+        "readability",
+        "readable",
+        "trafilatura",
+    ];
+    let probe_start = Instant::now();
+    let tools = have_many(COMMANDS);
+    let tools_elapsed = probe_start.elapsed();
+    let h = |name: &str| tools.get(name).copied().unwrap_or(false);
+
+    let internet = net_handle.join().unwrap_or(InternetStatus::Unknown);
+
+    let probe = EnvProbe {
+        os_name: detect_os_name(),
+        os_family: std::env::consts::FAMILY.to_string().replace(
+            "unix",
+            match std::env::consts::OS {
+                "macos" => "macos",
+                "linux" => "linux",
+                other => other,
+            },
+        ),
+        arch: std::env::consts::ARCH.to_string(),
+        shell: detect_shell(),
+        has_rg: h("rg"),
+        has_fd: h("fd") || h("fdfind"),
+        has_jq: h("jq"),
+        has_git: h("git"),
+        has_gh: h("gh"),
+        has_python: h("python3") || h("python"),
+        has_node: h("node"),
+        has_cargo: h("cargo"),
+        has_gsed: h("gsed"),
+        has_curl: h("curl"),
+        has_wget: h("wget"),
+        has_dig: h("dig"),
+        has_nslookup: h("nslookup"),
+        has_netcat: h("nc") || h("ncat"),
+        has_nmap: h("nmap"),
+        has_ss: h("ss"),
+        has_netstat: h("netstat"),
+        has_lsof: h("lsof"),
+        has_tcpdump: h("tcpdump"),
+        has_tshark: h("tshark") || h("wireshark"),
+        has_mtr: h("mtr"),
+        has_traceroute: h("traceroute") || h("tracert"),
+        has_htop: h("htop"),
+        has_btop: h("btop") || h("btm"),
+        has_iostat: h("iostat"),
+        has_dtrace: h("dtrace"),
+        has_strace: h("strace"),
+        has_journalctl: h("journalctl"),
+        has_systemctl: h("systemctl"),
+        has_launchctl: h("launchctl"),
+        has_nvidia_smi: h("nvidia-smi"),
+        has_rocm_smi: h("rocm-smi"),
+        has_openssl: h("openssl"),
+        has_gpg: h("gpg") || h("gpg2"),
+        has_ssh: h("ssh"),
+        has_keychain_cli: h("security"),
+        has_secret_tool: h("secret-tool"),
+        has_httpie: h("http") || h("httpie"),
+        has_curl_impersonate: h("curl_chrome110")
+            || h("curl_chrome116")
+            || h("curl_chrome120")
+            || h("curl-impersonate")
+            || h("curl-impersonate-chrome"),
+        has_aria2: h("aria2c"),
+        has_yt_dlp: h("yt-dlp") || h("youtube-dl"),
+        has_pandoc: h("pandoc"),
+        has_lynx: h("lynx"),
+        has_w3m: h("w3m"),
+        has_chromium: h("chromium") || h("google-chrome") || h("chrome"),
+        has_playwright: h("playwright"),
+        has_puppeteer: h("puppeteer"),
+        has_readability: h("readability") || h("readable"),
+        has_trafilatura: h("trafilatura"),
+        internet,
+    };
+
+    let detected: usize = tools.values().filter(|&&v| v).count();
+    tracing::info!(
+        total_ms = t0.elapsed().as_millis() as u64,
+        tools_ms = tools_elapsed.as_millis() as u64,
+        tools_probed = COMMANDS.len(),
+        tools_found = detected,
+        internet = ?probe.internet,
+        "env_probe complete"
+    );
+    probe
 }
