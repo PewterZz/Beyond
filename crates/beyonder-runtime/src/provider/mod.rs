@@ -24,7 +24,9 @@ pub fn build_system_prompt(
     tools: &[ToolDescriptor],
     approval_mode: ApprovalMode,
 ) -> String {
+    let t0 = std::time::Instant::now();
     let env = env_probe::probe_environment();
+    let probe_elapsed_ms = t0.elapsed().as_millis() as u64;
     let tool_list = tools
         .iter()
         .map(|t| format!("  - `{}`: {}", t.name, t.description))
@@ -105,7 +107,7 @@ and ask the user what to do instead.\n"
             .to_string(),
     };
 
-    format!(
+    let prompt = format!(
         "You are Beyond — an AI coding agent embedded inside an agent-native terminal built in Rust.\n\
 You run directly on the user's machine with full access to their local environment.\n\
 \n\
@@ -220,7 +222,18 @@ State what you did and what changed — skip narration of every tool call.",
         approval_block = approval_block,
         sed_rule = env.sed_inplace_rule(),
         os_specific = os_specific,
-    )
+    );
+    let total_ms = t0.elapsed().as_millis() as u64;
+    if probe_elapsed_ms >= 50 {
+        tracing::warn!(
+            total_ms,
+            probe_elapsed_ms,
+            "build_system_prompt blocked on env_probe — prewarm did not finish before first agent spawn"
+        );
+    } else {
+        tracing::debug!(total_ms, probe_elapsed_ms, "build_system_prompt complete");
+    }
+    prompt
 }
 
 fn os_specific_rules(env: &EnvProbe) -> String {

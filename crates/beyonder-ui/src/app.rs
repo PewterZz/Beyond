@@ -731,6 +731,16 @@ impl App {
         config: BeyonderConfig,
         event_loop_proxy: EventLoopProxy<()>,
     ) -> Result<Self> {
+        // Prewarm the env probe in a background thread. `probe_environment`
+        // fans ~45 subprocess spawns + a network reachability check; paying
+        // that during the first agent spawn would stall the prompt submission
+        // (the tokio task is blocked inside `OllamaBackend::new` →
+        // `build_system_prompt`). Kicking it off here lets the OnceLock fill
+        // while the renderer, store, and window finish initializing.
+        std::thread::spawn(|| {
+            let _ = beyonder_runtime::provider::probe_environment();
+        });
+
         let mut renderer = Renderer::new(Arc::clone(&window)).await?;
         renderer.set_theme(config.resolved_theme());
         // IME off by default — on macOS every keystroke otherwise routes through
