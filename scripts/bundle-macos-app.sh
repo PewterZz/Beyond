@@ -36,7 +36,19 @@ fi
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-cp "$BIN" "$APP/Contents/MacOS/beyondtty"
+# Install the real binary as beyondtty-bin and a thin wrapper as the
+# CFBundleExecutable entry point. The wrapper redirects stderr to
+# ~/Library/Logs/Beyondtty/beyondtty.log so RUST_LOG output (set via
+# `launchctl setenv RUST_LOG ...`) survives the open -a launch path
+# where the process has no controlling terminal.
+cp "$BIN" "$APP/Contents/MacOS/beyondtty-bin"
+chmod +x "$APP/Contents/MacOS/beyondtty-bin"
+cat > "$APP/Contents/MacOS/beyondtty" << 'WRAPPER'
+#!/bin/sh
+LOG="$HOME/Library/Logs/Beyondtty/beyondtty.log"
+mkdir -p "$(dirname "$LOG")"
+exec "$(dirname "$0")/beyondtty-bin" 2>>"$LOG"
+WRAPPER
 chmod +x "$APP/Contents/MacOS/beyondtty"
 
 cp "$ICNS" "$APP/Contents/Resources/beyondtty.icns"

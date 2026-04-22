@@ -657,6 +657,9 @@ pub struct App {
     /// Throttle for blocking env-probe subprocesses (node --version, conda env list).
     /// Only re-run them if this much time has elapsed since the last probe.
     last_env_probe: std::time::Instant,
+    /// Result slot for the background env-probe task. The spawn_blocking task
+    /// writes (conda, node, conda_envs) here; tick() drains it without blocking.
+    env_probe_result: Arc<std::sync::Mutex<Option<(String, String, Vec<String>)>>>,
 
     // ── Shell-command hang watchdog ───────────────────────────────────────────
     /// Last observed output length for the currently-running command and the
@@ -933,7 +936,7 @@ impl App {
         let mut input = InputEditor::new();
         input.load_history_from_disk();
 
-        Ok(Self {
+        let mut app = Self {
             renderer,
             input,
             config,
@@ -958,9 +961,9 @@ impl App {
             mouse_button_down: None,
             last_mouse_cell: None,
             last_lmb_press: None,
-            current_conda: current_conda_env(),
-            current_node: current_node_version(),
-            conda_envs: fetch_conda_envs(),
+            current_conda: "—".to_string(),
+            current_node: "—".to_string(),
+            conda_envs: vec![],
             node_versions: fetch_node_versions(),
             open_pill_dropdown: None,
             dropdown_items: vec![],
@@ -977,6 +980,7 @@ impl App {
             blocks_dirty: false,
             // Use a past instant so the first post-command probe runs after startup.
             last_env_probe: std::time::Instant::now() - std::time::Duration::from_secs(60),
+            env_probe_result: Arc::new(std::sync::Mutex::new(None)),
             hang_last_output_len: None,
             hang_last_output_change_at: None,
             hang_warned: false,
@@ -1001,7 +1005,29 @@ impl App {
             remote_connect_gen: 0,
             event_loop_proxy,
             editor_only,
-        })
+        };
+
+        // Kick off startup env-probe in the background so the window opens
+        // immediately. When launched from Finder the process has no shell
+        // environment, so current_conda_env / current_node_version / fetch_conda_envs
+        // all fall through to shell_probe() (spawning zsh -ilc) which can take
+        // 1-2s each. Doing this off-thread means the window is ready in <50ms
+        // regardless. tick() picks up the results via env_probe_result.
+        let slot = app.env_probe_result.clone();
+        // Push last_env_probe far into the future so the first post-command
+        // periodic probe is gated 30s from when these startup results land,
+        // not from process start.
+        app.last_env_probe = std::time::Instant::now() + std::time::Duration::from_secs(3600);
+        tokio::task::spawn_blocking(move || {
+            let conda = current_conda_env();
+            let node = current_node_version();
+            let envs = fetch_conda_envs();
+            if let Ok(mut g) = slot.lock() {
+                *g = Some((conda, node, envs));
+            }
+        });
+
+        Ok(app)
     }
 
     /// Swap App's active per-tab fields with those in `target`.
@@ -3753,6 +3779,23 @@ impl App {
             }
         }
 
+        // Pick up completed background env-probe (conda + node version).
+        // try_lock is non-blocking — if the task is still running we skip and
+        // try again next tick. had_work=true triggers a redraw so the pill
+        // labels update as soon as the result arrives.
+        if let Ok(mut g) = self.env_probe_result.try_lock() {
+            if let Some((conda, node, envs)) = g.take() {
+                self.current_conda = conda;
+                self.current_node = node;
+                if !envs.is_empty() {
+                    self.conda_envs = envs;
+                }
+                // Reset the periodic gate so next post-command probe runs 30s from now.
+                self.last_env_probe = std::time::Instant::now();
+                had_work = true;
+            }
+        }
+
         // Shell-command hang watchdog. Always-on at WARN level — the single
         // most useful signal when a user reports "ls hangs": tells us exactly
         // which command is stalled, how long since output stopped growing, and
@@ -3893,12 +3936,18 @@ impl App {
                 // Clear live cells — the command is done.
                 self.renderer.tui_cells = vec![];
                 // Refresh pill labels — user may have run conda activate / nvm use.
-                // node --version and conda env list are blocking subprocesses.
-                // Only re-run them every 30 s to avoid freezing the event loop.
+                // Kick off a background probe so we never block the event loop.
+                // Results are picked up by tick() via env_probe_result.
                 if self.last_env_probe.elapsed().as_secs() >= 30 {
-                    self.current_conda = current_conda_env();
-                    self.current_node = current_node_version();
                     self.last_env_probe = std::time::Instant::now();
+                    let slot = self.env_probe_result.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let conda = current_conda_env();
+                        let node = current_node_version();
+                        if let Ok(mut g) = slot.lock() {
+                            *g = Some((conda, node, vec![]));
+                        }
+                    });
                 }
             }
         }

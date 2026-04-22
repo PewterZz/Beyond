@@ -25,6 +25,8 @@ fn main() -> Result<()> {
         .init();
 
     info!("Beyond starting");
+    #[cfg(target_os = "macos")]
+    disable_app_nap();
     let config = BeyonderConfig::load_or_default();
 
     let event_loop = EventLoop::<()>::with_user_event().build()?;
@@ -193,6 +195,35 @@ fn load_winit_icon() -> Option<Icon> {
     let rgba = img.into_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
     Icon::from_rgba(rgba.into_raw(), w, h).ok()
+}
+
+/// Assert NSActivityLatencyCritical | NSActivityUserInitiated so macOS never
+/// App-Naps or coalesces timers for this process — even when the window is
+/// unfocused. The .app plist has NSAppSleepDisabled but that only applies when
+/// launched as a bundle; this covers `cargo run` and any other invocation path.
+/// The returned token is intentionally leaked to keep the activity for the
+/// process lifetime.
+#[cfg(target_os = "macos")]
+fn disable_app_nap() {
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send_id};
+    use std::ffi::CString;
+
+    // NSActivityLatencyCritical (0xFF00000000) prevents timer coalescing.
+    // NSActivityUserInitiated  (0x00FFFFFF)   prevents App Nap.
+    const OPTIONS: usize = 0xFF00_0000_00 | 0x00FF_FFFF;
+
+    unsafe {
+        let reason_cstr = CString::new("terminal emulator").unwrap();
+        let reason: Retained<AnyObject> =
+            msg_send_id![class!(NSString), stringWithUTF8String: reason_cstr.as_ptr()];
+
+        let pi: Retained<AnyObject> = msg_send_id![class!(NSProcessInfo), processInfo];
+        let token: Retained<AnyObject> =
+            msg_send_id![&*pi, beginActivityWithOptions: OPTIONS reason: &*reason];
+        std::mem::forget(token);
+    }
 }
 
 /// Set the macOS Dock icon programmatically via NSApplication.
