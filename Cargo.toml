@@ -68,7 +68,7 @@ portable-pty = "0.8"
 alacritty_terminal = "0.26"
 
 # GPU / Windowing
-wgpu = "24"
+wgpu = "29"
 winit = "0.30"
 glyphon = "0.8"
 
