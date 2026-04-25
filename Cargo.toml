@@ -74,7 +74,7 @@ glyphon = "0.8"
 
 # Config
 toml = "0.8"
-notify = "6"
+notify = "8"
 
 # Protocol
 bytes = "1"
